@@ -1,10 +1,5 @@
-# engine_advanced.py
 from datetime import datetime, timedelta, timezone
 import swisseph as swe
-
-# =====================================================================
-# CONSTANTS & CONFIGURATION
-# =====================================================================
 
 PLANET_IDS = {
     "Sun": swe.SUN, "Moon": swe.MOON, "Mars": swe.MARS,
@@ -14,31 +9,20 @@ PLANET_IDS = {
     "Neptune": swe.NEPTUNE, "Pluto": swe.PLUTO
 }
 
-# Combustion limit orbs from Sun in degrees
 COMBUSTION_ORBS = {
-    "Moon": 12.0, "Mars": 17.0, "Mercury": 14.0,  # 12° when Retrograde
+    "Moon": 12.0, "Mars": 17.0, "Mercury": 14.0,
     "Jupiter": 11.0, "Venus": 10.0, "Saturn": 15.0
 }
 
 HORA_SEQUENCE = ["Sun", "Venus", "Mercury", "Moon", "Saturn", "Jupiter", "Mars"]
 WEEKDAY_FIRST_HORA = {0: "Sun", 1: "Moon", 2: "Mars", 3: "Mercury", 4: "Jupiter", 5: "Venus", 6: "Saturn"}
 
-# =====================================================================
-# 1. VARGOTTAMA DETECTION
-# =====================================================================
-
 def check_vargottama(d1_rashi_idx: int, d9_rashi_idx: int) -> bool:
-    """Returns True if planet occupies the same sign in D1 and D9."""
     return d1_rashi_idx == d9_rashi_idx
 
-# =====================================================================
-# 2. COMBUSTION CHECK
-# =====================================================================
-
 def check_combustion(planet_name: str, planet_long: float, sun_long: float, is_retro: bool = False) -> dict:
-    """Calculates if planet is combust by Sun proximity."""
     if planet_name in ["Sun", "Rahu", "Ketu", "Uranus", "Neptune", "Pluto"]:
-        return {"is_combust": False, "orb": 0.0}
+        return {"is_combust": False, "orb_degrees": 0.0}
     
     limit_orb = COMBUSTION_ORBS.get(planet_name, 12.0)
     if planet_name == "Mercury" and is_retro:
@@ -53,15 +37,7 @@ def check_combustion(planet_name: str, planet_long: float, sun_long: float, is_r
         "limit_orb": limit_orb
     }
 
-# =====================================================================
-# 3. PAAP KARTARI YOGA DETECTION
-# =====================================================================
-
 def check_paap_kartari(target_house: int, house_planets: dict) -> bool:
-    """
-    Checks if a house is hemmed between Malefics in the 12th and 2nd houses relative to it.
-    Malefics: Sun, Mars, Saturn, Rahu, Ketu
-    """
     malefics = {"Sun", "Mars", "Saturn", "Rahu", "Ketu"}
     prev_house = 12 if target_house == 1 else target_house - 1
     next_house = 1 if target_house == 12 else target_house + 1
@@ -71,39 +47,19 @@ def check_paap_kartari(target_house: int, house_planets: dict) -> bool:
 
     return prev_has_malefic and next_has_malefic
 
-# =====================================================================
-# 4. PANCHAK TIMINGS
-# =====================================================================
-
 def check_panchak(moon_longitude: float) -> dict:
-    """
-    Panchak occurs when Moon transits from 3rd Pada of Dhanishta (300°)
-    through Revati (360°).
-    """
     moon_lon = moon_longitude % 360.0
-    is_panchak = moon_lon >= 300.0  # Dhanishta (2nd half), Shatabhisha, Purva/Uttara Bhadrapada, Revati
-    
-    panchak_types = {
-        0: "Raj Panchak (Favorable)", 1: "Agni Panchak (Danger from Fire)",
-        2: "Mritayu Panchak (Risk of Injury)", 3: "Chor Panchak (Financial Loss)",
-        4: "Roga Panchak (Illness)", 5: "Raj Panchak", 6: "Grah Panchak"
-    }
-    
+    is_panchak = moon_lon >= 300.0
     return {
         "is_panchak": is_panchak,
         "degree": round(moon_lon, 2)
     }
 
-# =====================================================================
-# 5. HORA & LAGNA TIMINGS ENGINE
-# =====================================================================
-
 def calculate_hora_timings(jd_ut: float, lat: float, lon: float, tz_offset: float):
-    """Calculates 24 Hora planetary hours for a given day from Sunrise to Sunrise."""
-    # Compute Sunrise and Sunset using Swiss Ephemeris
-    res_rise, _ = swe.rise_trans(jd_ut, swe.SUN, geopos=(lon, lat, 0), rsmi=swe.CALC_RISE)
-    res_set, _ = swe.rise_trans(jd_ut, swe.SUN, geopos=(lon, lat, 0), rsmi=swe.CALC_SET)
-    res_next_rise, _ = swe.rise_trans(jd_ut + 1.0, swe.SUN, geopos=(lon, lat, 0), rsmi=swe.CALC_RISE)
+    # PySwisseph returns (status, (jd,...), err)
+    _, res_rise, _ = swe.rise_trans(jd_ut, swe.SUN, geopos=(lon, lat, 0), rsmi=swe.CALC_RISE)
+    _, res_set, _ = swe.rise_trans(jd_ut, swe.SUN, geopos=(lon, lat, 0), rsmi=swe.CALC_SET)
+    _, res_next_rise, _ = swe.rise_trans(jd_ut + 1.0, swe.SUN, geopos=(lon, lat, 0), rsmi=swe.CALC_RISE)
 
     sunrise = res_rise[0]
     sunset = res_set[0]
@@ -112,20 +68,17 @@ def calculate_hora_timings(jd_ut: float, lat: float, lon: float, tz_offset: floa
     day_hora_duration = (sunset - sunrise) / 12.0
     night_hora_duration = (next_sunrise - sunset) / 12.0
 
-    # Determine First Hora Lord from Weekday
-    weekday = int((jd_ut + 1.5) % 7)  # 0 = Sunday
+    weekday = int((jd_ut + 1.5) % 7)
     start_lord = WEEKDAY_FIRST_HORA[weekday]
     start_idx = HORA_SEQUENCE.index(start_lord)
 
     horas = []
-    # Day Horas (1-12)
     for i in range(12):
         h_start = sunrise + (i * day_hora_duration)
         h_end = h_start + day_hora_duration
         lord = HORA_SEQUENCE[(start_idx + i) % 7]
         horas.append({"number": i + 1, "lord": lord, "type": "Day", "start_jd": h_start, "end_jd": h_end})
 
-    # Night Horas (13-24)
     for i in range(12):
         h_start = sunset + (i * night_hora_duration)
         h_end = h_start + night_hora_duration
@@ -133,10 +86,6 @@ def calculate_hora_timings(jd_ut: float, lat: float, lon: float, tz_offset: floa
         horas.append({"number": i + 13, "lord": lord, "type": "Night", "start_jd": h_start, "end_jd": h_end})
 
     return horas
-
-# =====================================================================
-# 6. ASPECT SEARCH ENGINE (FINANCIAL ASTROLOGY TOOL)
-# =====================================================================
 
 def search_aspect_contacts(
     start_jd: float,
@@ -146,16 +95,11 @@ def search_aspect_contacts(
     target_aspect_deg: float,
     ayanamsha_mode: int = swe.SIDM_LAHIRI
 ):
-    """
-    Scans a date range to find exact angular aspect contacts between two planets
-    (Conjunction 0°, Sextile 60°, Square 90°, Trine 120°, Opp 180°, Quintile 72°, Quincunx 150°).
-    """
     swe.set_sid_mode(ayanamsha_mode, 0, 0)
     flags = swe.FLG_SWIEPH | swe.FLG_SPEED | swe.FLG_SIDEREAL
     
     contacts = []
-    step_days = 0.5  # Scan half-day increments
-
+    step_days = 0.5
     curr_jd = start_jd
     end_jd = start_jd + days_range
 
@@ -163,13 +107,14 @@ def search_aspect_contacts(
         res1, _ = swe.calc_ut(curr_jd, p1_id, flags)
         res2, _ = swe.calc_ut(curr_jd, p2_id, flags)
         
-        lon1, speed1 = res1[0] % 360.0, res1[3]
-        lon2, speed2 = res2[0] % 360.0, res2[3]
+        # Access index [0][0] for position, [0][3] for speed
+        lon1, speed1 = res1[0][0] % 360.0, res1[0][3]
+        lon2, speed2 = res2[0][0] % 360.0, res2[0][3]
 
         diff = abs((lon1 - lon2 + 180.0) % 360.0 - 180.0)
         aspect_error = abs(diff - target_aspect_deg)
 
-        if aspect_error < 0.5:  # Within 0.5 degree of exact contact
+        if aspect_error < 0.5:
             contacts.append({
                 "julian_day": curr_jd,
                 "planet_1_lon": round(lon1, 2),
@@ -178,7 +123,7 @@ def search_aspect_contacts(
                 "is_p1_retro": speed1 < 0,
                 "is_p2_retro": speed2 < 0
             })
-            curr_jd += 2.0  # Skip ahead after finding contact
+            curr_jd += 2.0
         else:
             curr_jd += step_days
 
