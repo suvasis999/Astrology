@@ -360,44 +360,41 @@ def fetch_odia_calendar_month(
 # =====================================================================
 # PDF TEXT EXTRACTION WITH PyMuPDF & TESSERACT OCR FALLBACK
 # =====================================================================
+# Use this simplified OCR logic in main.py
 @app.post("/api/extract-pdf-text")
 def extract_pdf_page_text(payload: PdfExtractRequest):
     try:
-        # Check if required libraries exist
-        try:
-            import fitz
-        except ImportError:
-            raise HTTPException(status_code=500, detail="PyMuPDF (fitz) is not installed.")
-
+        # Use simple requests
         res = requests.get(payload.pdf_url, timeout=20)
-        if res.status_code != 200:
-            raise HTTPException(status_code=400, detail="PDF download failed")
-
-        doc = fitz.open(stream=io.BytesIO(res.content), filetype="pdf")
+        
+        # Open PDF with PyMuPDF
+        doc = fitz.open(stream=res.content, filetype="pdf")
         page = doc[payload.page_number - 1]
         
-        # Digital Text
-        digital_text = page.get_text("text") or ""
-        clean_text = re.sub(r'\s+', ' ', digital_text).strip()
+        # 1. Try simple text extraction
+        text = page.get_text("text")
+        
+        # 2. If text is empty (Scanned Page), trigger OCR via OCR.space (Easiest & Free)
+        if not text or len(text.strip()) < 5:
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+            img_byte_arr = io.BytesIO(pix.tobytes("png"))
+            
+            # Send to OCR.space API (No system binaries required!)
+            ocr_res = requests.post(
+                "https://api.ocr.space/parse/image",
+                files={"filename.png": ("page.png", img_byte_arr, "image/png")},
+                data={"apikey": "helloworld", "language": "ori", "isOverlayRequired": "false"},
+                timeout=20
+            )
+            result = ocr_res.json()
+            if "ParsedResults" in result:
+                text = result["ParsedResults"][0].get("ParsedText", "")
+            else:
+                text = "ସ୍କାନ୍ ହୋଇଥିବା ପୃଷ୍ଠାରୁ ଲେଖା ମିଳିଲା ନାହିଁ ।"
 
-        # Fallback to OCR only if it exists
-        if len(clean_text) < 15:
-            try:
-                import pytesseract
-                from PIL import Image
-                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-                img = Image.open(io.BytesIO(pix.tobytes("png")))
-                ocr_text = pytesseract.image_to_string(img, lang='ori+eng')
-                clean_text = re.sub(r'\s+', ' ', ocr_text).strip()
-            except ImportError:
-                return {"status": "success", "text": clean_text, "note": "OCR library missing, digital text only."}
-            except Exception as e:
-                return {"status": "success", "text": clean_text, "note": f"OCR failed: {str(e)}"}
-
-        return {"status": "success", "text": clean_text}
-
+        return {"status": "success", "text": text.strip()}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "error", "text": f"Error: {str(e)}"}
 # =====================================================================
 # ODIA NLP DICTIONARY LOOKUP ENDPOINT
 # =====================================================================
