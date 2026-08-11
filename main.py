@@ -375,7 +375,6 @@ def sanitize_response(data):
 
 @app.post("/api/extract-pdf-text")
 def extract_pdf_page_text(payload: PdfExtractRequest):
-    # 1. Strict Validation: Backend ONLY works with web URLs
     if not payload.pdf_url.lower().startswith("http"):
         raise HTTPException(
             status_code=400, 
@@ -390,40 +389,22 @@ def extract_pdf_page_text(payload: PdfExtractRequest):
 
         # Open with PyMuPDF
         doc = fitz.open(stream=io.BytesIO(res.content), filetype="pdf")
+        
+        if payload.page_number - 1 >= len(doc):
+            raise HTTPException(status_code=400, detail="Page number out of range")
+            
         page = doc[payload.page_number - 1]
 
-        # Try digital text
+        # Extract digital text directly (Lightning fast!)
         text = page.get_text("text").strip()
 
-        # If scanned (OCR), call OCR.space API
-        if len(text) < 15:
-            # 2.0x scaling for better accuracy
-            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-            img_bytes = pix.tobytes("png")
-            
-            ocr_res = requests.post(
-                "https://api.ocr.space/parse/image",
-                files={"page.png": ("page.png", img_bytes, "image/png")},
-                data={
-                    "apikey": "K82596486888957", 
-                    "language": "ori",
-                    "isOverlayRequired": "false"
-                },
-                timeout=30
-            )
-            json_data = ocr_res.json()
-            if "ParsedResults" in json_data and json_data["ParsedResults"]:
-                text = json_data["ParsedResults"][0].get("ParsedText", "")
-            else:
-                text = "ସ୍କାନ୍ ହୋଇଥିବା ପୃଷ୍ଠାରୁ ଲେଖା ମିଳିଲା ନାହିଁ ।"
+        if not text:
+            text = "ଏହି ପୃଷ୍ଠାରେ କୌଣସି ଲେଖା ମିଳିଲା ନାହିଁ ।"
 
-        # Return sanitized dictionary to prevent UnicodeDecodeError
         return sanitize_response({"status": "success", "text": text})
 
     except Exception as e:
-        # We sanitize the error detail just in case the error object contains bytes
         raise HTTPException(status_code=500, detail=str(sanitize_response(str(e))))
-    
 # =====================================================================
 # ODIA NLP DICTIONARY LOOKUP ENDPOINT
 # =====================================================================
