@@ -6,23 +6,18 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from xhtml2pdf import pisa
 from pypdf import PdfReader
 
-# Safe gTTS import to prevent server boot failure
+# Safe gTTS import
 try:
     from gTTS import gTTS
     GTTS_AVAILABLE = True
 except ImportError:
     gTTS = None
     GTTS_AVAILABLE = False
-    print("⚠️ gTTS package not found. Text-to-speech feature will return fallback error.")
-
-from engine import calculate_astrology, get_daily_rashifal
-from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
 
 # =====================================================================
-# ODIA NLP DICTIONARY ENGINE (Loaded from OdiaNLP/dictionary GitHub)
+# ODIA NLP DICTIONARY ENGINE
 # =====================================================================
 ODIA_DICT = {}
 
@@ -62,7 +57,7 @@ app.add_middleware(
 )
 
 # =====================================================================
-# PDF TEXT EXTRACTION ENDPOINT (Reads Full PDF Page)
+# PDF TEXT EXTRACTION
 # =====================================================================
 class PdfExtractRequest(BaseModel):
     pdf_url: str
@@ -70,11 +65,10 @@ class PdfExtractRequest(BaseModel):
 
 @app.post("/api/extract-pdf-text")
 def extract_pdf_page_text(payload: PdfExtractRequest):
-    """Downloads PDF from URL and extracts plain text for a specific page."""
     try:
         res = requests.get(payload.pdf_url, timeout=15)
         if res.status_code != 200:
-            raise HTTPException(status_code=400, detail="Unable to download PDF file")
+            raise HTTPException(status_code=400, detail="PDF download failed")
 
         pdf_file = io.BytesIO(res.content)
         reader = PdfReader(pdf_file)
@@ -88,25 +82,28 @@ def extract_pdf_page_text(payload: PdfExtractRequest):
         page_text = reader.pages[page_idx].extract_text() or ""
         clean_text = re.sub(r'\s+', ' ', page_text).strip()
 
+        is_scanned = len(clean_text) < 10
+
         return {
             "status": "success",
             "page": payload.page_number,
             "total_pages": total_pages,
-            "text": clean_text
+            "text": clean_text,
+            "is_scanned": is_scanned
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"PDF extraction error: {str(e)}")
 
 
 # =====================================================================
-# SAFE ODIA TTS ENDPOINT
+# ROBUST ODIA TTS ENDPOINT
 # =====================================================================
 @app.post("/api/tts")
 def generate_odia_speech(payload: dict):
     if not GTTS_AVAILABLE or gTTS is None:
         raise HTTPException(
             status_code=500,
-            detail="gTTS package is missing on the server. Add gTTS to requirements.txt"
+            detail="gTTS module missing on backend"
         )
 
     try:
@@ -116,11 +113,16 @@ def generate_odia_speech(payload: dict):
         if not raw_text or not raw_text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-        clean_text = re.sub(r'\s+', ' ', raw_text).strip()
+        # Clean non-printable characters & excessive spaces
+        clean_text = re.sub(r'[^\w\s\u0B00-\u0B7F.,!?-]', '', raw_text)
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
 
-        # Limit chunk size to prevent gTTS timeout
-        if len(clean_text) > 800:
-            clean_text = clean_text[:800] + "..."
+        if not clean_text:
+            clean_text = raw_text[:300]
+
+        # Chunk text to avoid gTTS timeouts
+        if len(clean_text) > 500:
+            clean_text = clean_text[:500] + "..."
 
         tts = gTTS(text=clean_text, lang=lang, slow=False)
         audio_buffer = io.BytesIO()
@@ -130,8 +132,8 @@ def generate_odia_speech(payload: dict):
         return {"status": "success", "audio_base64": audio_base64}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS Generation Error: {str(e)}")
-
+        print(f"❌ TTS Backend Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"TTS Engine Error: {str(e)}")
 
 # =====================================================================
 # ODIA NLP DICTIONARY LOOKUP
