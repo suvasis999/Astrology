@@ -23,22 +23,21 @@ except ImportError:
     GTTS_AVAILABLE = False
     print("⚠️ gTTS package not found. Text-to-speech endpoint will return fallback error.")
 
-# Import local engines (Ensure engine.py and odia_calendar.py are present in your root directory)
-# engine.py uses pyswisseph / Swiss Ephemeris & Jataka calculations internally
+# Import local engines (engine.py & odia_calendar.py)
 try:
     from engine import calculate_astrology, get_daily_rashifal
     from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
     ASTRO_ENGINE_LOADED = True
 except ImportError as e:
     ASTRO_ENGINE_LOADED = False
-    print(f"⚠️ Astrology / Calendar Engine import warning: {e}")
+    print(f"⚠️ Engine import warning: {e}")
 
 
 # =====================================================================
-# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE / SERIALIZATION ERRORS)
+# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE ERRORS)
 # =====================================================================
 def sanitize_response(data):
-    """Recursively converts bytes to base64 strings to ensure UTF-8 JSON compliance."""
+    """Recursively converts raw bytes to base64 strings for UTF-8 JSON compliance."""
     if isinstance(data, dict):
         return {k: sanitize_response(v) for k, v in data.items()}
     elif isinstance(data, list):
@@ -77,13 +76,13 @@ def load_odianlp_dictionary():
                             m = item.get("meaning") or item.get("english")
                             if w and m:
                                 ODIA_DICT[w.strip()] = m
-                print(f"✅ Successfully loaded {len(ODIA_DICT)} entries into OdiaNLP dictionary.")
+                print(f"✅ Loaded {len(ODIA_DICT)} entries into OdiaNLP dictionary.")
                 return
         except Exception as e:
             print(f"⚠️ Failed source {url}: {e}")
             continue
             
-    print("⚠️ OdiaNLP dictionary offline fallback enabled.")
+    print("⚠️ OdiaNLP dictionary fallback mode active.")
 
 
 # =====================================================================
@@ -99,7 +98,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Vedic Astro Engine (SwissEph / Jataka) & Odia NLP API", 
+    title="Vedic Astro Engine & Kohinoor Odia Calendar API", 
     lifespan=lifespan
 )
 
@@ -116,7 +115,7 @@ app.add_middleware(
 
 
 # =====================================================================
-# CUSTOM EXCEPTION HANDLER (PREVENTS ENCODING CRASHES ON BAD REQUESTS)
+# CUSTOM EXCEPTION HANDLER
 # =====================================================================
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
@@ -173,18 +172,18 @@ def health_check():
         "gtts_installed": GTTS_AVAILABLE,
         "fitz_installed": fitz_ok,
         "dictionary_entries": len(ODIA_DICT),
-        "message": "Vedic Astro Engine & Odia Reader Backend Running"
+        "message": "Vedic Astro Engine & Kohinoor Calendar Server Running"
     }
 
 
 # =====================================================================
-# ASTROLOGY KUNDLI CALCULATION ENDPOINT (SWISSEPH / JATAKA)
+# ASTROLOGY KUNDLI CALCULATION ENDPOINT
 # =====================================================================
 @app.post("/api/calculate")
 def calculate_kundli(data: BirthDataRequest):
     """
     Calculates D1/D9 Kundli charts, Vimshottari Dasha, Panchanga, 
-    and Rashi details using Swiss Ephemeris & Jataka calculations in engine.py.
+    and Rashi details using Swiss Ephemeris in engine.py.
     """
     try:
         if not ASTRO_ENGINE_LOADED:
@@ -201,8 +200,6 @@ def calculate_kundli(data: BirthDataRequest):
         )
 
         result["name"] = data.name
-        
-        # Safely extract Moon sign for daily rashifal
         moon_rashi_en = result.get("planets_en", {}).get("Moon", {}).get("sign", "Aries")
         result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
 
@@ -339,7 +336,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
 
 # =====================================================================
-# SERVER-SIDE PDF EXPORT ENDPOINT (BASE64 JSON RESPONSE)
+# SERVER-SIDE PDF EXPORT ENDPOINT
 # =====================================================================
 @app.post("/api/export-pdf")
 def export_kundli_pdf(data: BirthDataRequest):
@@ -407,7 +404,7 @@ def fetch_odia_calendar_month(
 
 
 # =====================================================================
-# PDF TEXT EXTRACTION ENDPOINT (HANDLES LOCAL FILE UPLOADS & REMOTE URLS)
+# PDF TEXT EXTRACTION ENDPOINT
 # =====================================================================
 @app.post("/api/extract-pdf-text")
 async def extract_pdf_page_text(
@@ -415,11 +412,6 @@ async def extract_pdf_page_text(
     page_number: int = Form(1),
     pdf: Optional[UploadFile] = File(None)
 ):
-    """
-    Handles both:
-    1. Local device binary upload via Multipart FormData (file:// or content://)
-    2. Remote Web URL via Form parameter (e.g. https://odiabook.com/...)
-    """
     try:
         pdf_bytes = None
 
@@ -443,7 +435,6 @@ async def extract_pdf_page_text(
         page = doc[page_number - 1]
         text = page.get_text("text").strip()
 
-        # Fallback to OCR.space if page has no digital text
         if len(text) < 15:
             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
             ocr_res = requests.post(
@@ -463,48 +454,29 @@ async def extract_pdf_page_text(
 
 
 # =====================================================================
-# ADVANCED ODIA NLP & DYNAMIC TRANSLATION DICTIONARY ENDPOINT
+# ADVANCED ODIA NLP & TRANSLATION DICTIONARY ENDPOINT
 # =====================================================================
 @app.get("/api/word-details")
 def get_word_details(word: str):
-    """
-    Multi-stage word details engine:
-    1. Direct OdiaNLP lookup
-    2. Case-insensitive key lookup
-    3. Reverse English-to-Odia search (e.g. searching 'major')
-    4. Grammatical suffix stripping for inflected Odia words
-    5. Dynamic MyMemory Translation API fallback (Guarantees results for ANY word)
-    6. Wiktionary fallback
-    """
     try:
         clean_word = word.strip().strip(".,!?:;\"'()[]{}«»")
         if not clean_word:
             return {"status": "error", "meaning": "ଶବ୍ଦ ଚୟନ କରନ୍ତୁ ।"}
 
-        # Stage 1: Exact Match in OdiaNLP Dictionary
+        # 1. Exact Match
         if clean_word in ODIA_DICT:
             val = ODIA_DICT[clean_word]
             meaning_str = ", ".join(val) if isinstance(val, list) else str(val)
-            return {
-                "status": "success",
-                "word": clean_word,
-                "meaning": meaning_str,
-                "source": "OdiaNLP Exact"
-            }
+            return {"status": "success", "word": clean_word, "meaning": meaning_str, "source": "OdiaNLP Exact"}
 
-        # Stage 2: Case-insensitive key match
+        # 2. Case-insensitive key match
         lower_word = clean_word.lower()
         for k, v in ODIA_DICT.items():
             if k.lower() == lower_word:
                 meaning_str = ", ".join(v) if isinstance(v, list) else str(v)
-                return {
-                    "status": "success",
-                    "word": k,
-                    "meaning": meaning_str,
-                    "source": "OdiaNLP Key"
-                }
+                return {"status": "success", "word": k, "meaning": meaning_str, "source": "OdiaNLP Key"}
 
-        # Stage 3: Reverse English-to-Odia Search (For English words like "major")
+        # 3. Reverse English-to-Odia Search (e.g., "major")
         english_matches = []
         for odia_k, eng_v in ODIA_DICT.items():
             eng_str = ", ".join(eng_v) if isinstance(eng_v, list) else str(eng_v)
@@ -513,14 +485,9 @@ def get_word_details(word: str):
                 if len(english_matches) >= 4:
                     break
         if english_matches:
-            return {
-                "status": "success",
-                "word": clean_word,
-                "meaning": "ଓଡ଼ିଆ ଅର୍ଥ (Matches):\n" + "\n".join(english_matches),
-                "source": "OdiaNLP English Search"
-            }
+            return {"status": "success", "word": clean_word, "meaning": "ଓଡ଼ିଆ ଅର୍ଥ (Matches):\n" + "\n".join(english_matches), "source": "OdiaNLP English Search"}
 
-        # Stage 4: Odia Grammatical Suffix Stripping
+        # 4. Grammatical Suffix Stripping
         suffixes = ["ମାନଙ୍କର", "ମାନଙ୍କୁ", "ମାନଙ୍କ", "ଠାରୁ", "ମାନେ", "ଙ୍କର", "ଙ୍କୁ", "କୁ", "ରେ", "ର", "ଟି", "ଟା", "ଏ", "ଙ୍କ"]
         for suffix in sorted(suffixes, key=len, reverse=True):
             if clean_word.endswith(suffix) and len(clean_word) > len(suffix):
@@ -528,14 +495,9 @@ def get_word_details(word: str):
                 if stem in ODIA_DICT:
                     val = ODIA_DICT[stem]
                     meaning_str = ", ".join(val) if isinstance(val, list) else str(val)
-                    return {
-                        "status": "success",
-                        "word": clean_word,
-                        "meaning": f"{meaning_str} (ମୂଳ ଶବ୍ଦ: {stem})",
-                        "source": "OdiaNLP Stemmed"
-                    }
+                    return {"status": "success", "word": clean_word, "meaning": f"{meaning_str} (ମୂଳ ଶବ୍ଦ: {stem})", "source": "OdiaNLP Stemmed"}
 
-        # Stage 5: High-Accuracy Dynamic Translation API (MyMemory)
+        # 5. Dynamic Translation API Fallback (MyMemory)
         is_english = all(ord(c) < 128 for c in clean_word if c.isalpha())
         langpair = "en|or" if is_english else "or|en"
         
@@ -547,45 +509,25 @@ def get_word_details(word: str):
                 translated = data.get("responseData", {}).get("translatedText", "")
                 if translated and "MYMEMORY WARNING" not in translated and translated.lower() != clean_word.lower():
                     label = "ଓଡ଼ିଆ ଅନୁବାଦ:" if is_english else "English Meaning:"
-                    return {
-                        "status": "success",
-                        "word": clean_word,
-                        "meaning": f"{label}\n{translated}",
-                        "source": "Translation Engine"
-                    }
+                    return {"status": "success", "word": clean_word, "meaning": f"{label}\n{translated}", "source": "Translation Engine"}
         except Exception as e:
             print(f"⚠️ Translation API error: {e}")
 
-        # Stage 6: Wiktionary Fallback
+        # 6. Wiktionary Fallback
         try:
             url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={requests.utils.quote(clean_word)}&format=json"
             res_wik = requests.get(url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
             pages = res_wik.json().get("query", {}).get("pages", {})
             for p_id, p_data in pages.items():
                 if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
-                    return {
-                        "status": "success",
-                        "word": clean_word,
-                        "meaning": p_data["extract"].strip(),
-                        "source": "Wiktionary"
-                    }
+                    return {"status": "success", "word": clean_word, "meaning": p_data["extract"].strip(), "source": "Wiktionary"}
         except Exception as e:
             print(f"⚠️ Wiktionary error: {e}")
 
-        return {
-            "status": "success",
-            "word": clean_word,
-            "meaning": f"'{clean_word}' ଶବ୍ଦର ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।",
-            "source": "None"
-        }
+        return {"status": "success", "word": clean_word, "meaning": f"'{clean_word}' ଶବ୍ଦର ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।", "source": "None"}
 
     except Exception as e:
-        return {
-            "status": "error",
-            "word": word,
-            "meaning": f"ଅର୍ଥ ଆଣିବାରେ ତ୍ରୁଟି: {str(e)}",
-            "source": "Error"
-        }
+        return {"status": "error", "word": word, "meaning": f"ଅର୍ଥ ଆଣିବାରେ ତ୍ରୁଟି: {str(e)}", "source": "Error"}
 
 
 # =====================================================================
