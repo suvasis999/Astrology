@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
 
 from engine import calculate_astrology, get_daily_rashifal
-from odia_calendar import get_kohinoor_odia_panchang
+from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
 
 app = FastAPI(title="Vedic Astro Engine API")
 
@@ -305,7 +305,7 @@ def export_kundli_pdf(data: BirthDataRequest):
 
 
 # =====================================================================
-# KOHINOOR ODIA CALENDAR ENDPOINT
+# KOHINOOR ODIA CALENDAR ENDPOINTS
 # =====================================================================
 @app.get("/api/odia-calendar")
 def fetch_odia_calendar(
@@ -316,6 +316,21 @@ def fetch_odia_calendar(
 ):
     try:
         data = get_kohinoor_odia_panchang(date_str=date, lat=lat, lon=lon, tz_offset=tz)
+        return {"status": "success", "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/odia-calendar-month")
+def fetch_odia_calendar_month(
+    year: int = 2026,
+    month: int = 8,
+    lat: float = 20.2961,
+    lon: float = 85.8245,
+    tz: float = 5.5,
+):
+    try:
+        data = get_kohinoor_month_calendar(year=year, month=month, lat=lat, lon=lon, tz_offset=tz)
         return {"status": "success", "data": data}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
