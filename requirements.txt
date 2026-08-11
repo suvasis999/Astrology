@@ -8,3 +8,6 @@ pytesseract
 Pillow
 xhtml2pdf
 python-multipart
+pyswisseph
+
+
