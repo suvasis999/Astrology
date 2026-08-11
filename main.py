@@ -348,10 +348,6 @@ def fetch_odia_calendar_month(
 # =====================================================================
 @app.post("/api/extract-pdf-text")
 def extract_pdf_page_text(payload: PdfExtractRequest):
-    """
-    1. Digital Text Extraction via PyMuPDF (Instant & Memory Safe).
-    2. Automatic Tesseract OCR (ori+eng) for Scanned PDF pages.
-    """
     try:
         res = requests.get(payload.pdf_url, timeout=20)
         if res.status_code != 200:
@@ -374,21 +370,25 @@ def extract_pdf_page_text(payload: PdfExtractRequest):
 
         mode = "digital"
 
-        # 2. OCR Fallback if text is sparse (< 15 chars)
+        # 2. OCR Fallback
         if len(clean_text) < 15:
             mode = "ocr"
             try:
-                # Render PDF page to image with 1.5x scale
-                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
 
-                # Run Tesseract with Odia ('ori') and English ('eng')
+                # Attempt Tesseract OCR
                 ocr_raw = pytesseract.image_to_string(img, lang='ori+eng')
                 clean_text = re.sub(r'\s+', ' ', ocr_raw).strip()
 
             except Exception as ocr_err:
-                print(f"❌ OCR Failure: {str(ocr_err)}")
-                clean_text = ""
+                # 🛑 RETURN THE EXACT ERROR TO YOUR APP INSTEAD OF HIDING IT
+                error_msg = str(ocr_err)
+                print(f"❌ OCR Failure Details: {error_msg}")
+                raise HTTPException(
+                    status_code=500, 
+                    detail=f"OCR Error: {error_msg}. (Note: Tesseract binary is missing on Render native Python runtime)."
+                )
 
         return {
             "status": "success",
@@ -398,11 +398,10 @@ def extract_pdf_page_text(payload: PdfExtractRequest):
             "extraction_mode": mode
         }
 
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        print(f"❌ PDF Extraction Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Extraction error: {str(e)}")
-
-
 # =====================================================================
 # ODIA NLP DICTIONARY LOOKUP ENDPOINT
 # =====================================================================
