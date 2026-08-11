@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
 
 from engine import calculate_astrology, get_daily_rashifal
+from odia_calendar import get_kohinoor_odia_panchang
 
 app = FastAPI(title="Vedic Astro Engine API")
 
@@ -25,14 +26,14 @@ app.add_middleware(
 # REQUEST PYDANTIC MODEL
 # =====================================================================
 class BirthDataRequest(BaseModel):
-  name: str = Field("Rahul Sharma", example="Rahul Sharma")
-  date: str = Field(..., example="1995-10-16")
-  time: str = Field(..., example="07:30:00")
-  latitude: float = Field(..., example=28.6139)
-  longitude: float = Field(..., example=77.2090)
-  tz_offset: float = Field(..., example=5.5)
-  ayanamsha: str = Field("LAHIRI", example="LAHIRI")
-  lang: str = Field("en", example="or")  # Options: "en", "hi", or "or"
+    name: str = Field("Rahul Sharma", example="Rahul Sharma")
+    date: str = Field(..., example="1995-10-16")
+    time: str = Field(..., example="07:30:00")
+    latitude: float = Field(..., example=28.6139)
+    longitude: float = Field(..., example=77.2090)
+    tz_offset: float = Field(..., example=5.5)
+    ayanamsha: str = Field("LAHIRI", example="LAHIRI")
+    lang: str = Field("en", example="or")  # Options: "en", "hi", or "or"
 
 
 # =====================================================================
@@ -40,7 +41,7 @@ class BirthDataRequest(BaseModel):
 # =====================================================================
 @app.get("/")
 def health_check():
-  return {"status": "ok", "message": "Vedic Astro Engine Server Running"}
+    return {"status": "ok", "message": "Vedic Astro Engine Server Running"}
 
 
 # =====================================================================
@@ -48,38 +49,38 @@ def health_check():
 # =====================================================================
 @app.post("/api/calculate")
 def calculate_kundli(data: BirthDataRequest):
-  try:
-    result = calculate_astrology(
-        date_str=data.date,
-        time_str=data.time,
-        latitude=data.latitude,
-        longitude=data.longitude,
-        tz_offset=data.tz_offset,
-        ayanamsha_mode=data.ayanamsha,
-        lang=data.lang,
-    )
+    try:
+        result = calculate_astrology(
+            date_str=data.date,
+            time_str=data.time,
+            latitude=data.latitude,
+            longitude=data.longitude,
+            tz_offset=data.tz_offset,
+            ayanamsha_mode=data.ayanamsha,
+            lang=data.lang,
+        )
 
-    result["name"] = data.name
+        result["name"] = data.name
 
-    # Get localized Daily Rashifal
-    moon_rashi_en = result["planets_en"]["Moon"]["sign"]
-    result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
+        # Get localized Daily Rashifal
+        moon_rashi_en = result["planets_en"]["Moon"]["sign"]
+        result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
 
-    return result
-  except Exception as e:
-    raise HTTPException(status_code=400, detail=str(e))
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # =====================================================================
 # HTML TEMPLATE BUILDER FOR PDF
 # =====================================================================
 def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
-  """Generates clean HTML styled for A4 PDF rendering via xhtml2pdf."""
+    """Generates clean HTML styled for A4 PDF rendering via xhtml2pdf."""
 
-  # Planetary Table Rows
-  planet_rows = ""
-  for p_name, p in result.get("planets", {}).items():
-    planet_rows += f"""
+    # Planetary Table Rows
+    planet_rows = ""
+    for p_name, p in result.get("planets", {}).items():
+        planet_rows += f"""
         <tr>
             <td style="padding: 6px; font-weight: bold; color: #b71c1c;">{p_name}</td>
             <td style="padding: 6px;">{p.get('sign', '')}</td>
@@ -90,16 +91,16 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         </tr>
         """
 
-  # Vimshottari Dasha Rows
-  dasha_rows = ""
-  for d in result.get("dasha", []):
-    bg_style = (
-        "background-color: #fff7ed; font-weight: bold;"
-        if d.get("is_active")
-        else ""
-    )
-    active_tag = " (CURRENT)" if d.get("is_active") else ""
-    dasha_rows += f"""
+    # Vimshottari Dasha Rows
+    dasha_rows = ""
+    for d in result.get("dasha", []):
+        bg_style = (
+            "background-color: #fff7ed; font-weight: bold;"
+            if d.get("is_active")
+            else ""
+        )
+        active_tag = " (CURRENT)" if d.get("is_active") else ""
+        dasha_rows += f"""
         <tr style="{bg_style}">
             <td style="padding: 6px;">{d.get('lord', '')} Mahadasha{active_tag}</td>
             <td style="padding: 6px;">{d.get('start_date', '')}</td>
@@ -108,10 +109,10 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         </tr>
         """
 
-  # Panchanga Details
-  panchanga = result.get("panchanga", {})
+    # Panchanga Details
+    panchanga = result.get("panchanga", {})
 
-  html = f"""
+    html = f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -259,7 +260,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
     </body>
     </html>
     """
-  return html
+    return html
 
 
 # =====================================================================
@@ -267,37 +268,54 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 # =====================================================================
 @app.post("/api/export-pdf")
 def export_kundli_pdf(data: BirthDataRequest):
-  try:
-    # 1. Compute Kundli Data
-    result = calculate_astrology(
-        date_str=data.date,
-        time_str=data.time,
-        latitude=data.latitude,
-        longitude=data.longitude,
-        tz_offset=data.tz_offset,
-        ayanamsha_mode=data.ayanamsha,
-        lang=data.lang,
-    )
-    result["name"] = data.name
+    try:
+        # 1. Compute Kundli Data
+        result = calculate_astrology(
+            date_str=data.date,
+            time_str=data.time,
+            latitude=data.latitude,
+            longitude=data.longitude,
+            tz_offset=data.tz_offset,
+            ayanamsha_mode=data.ayanamsha,
+            lang=data.lang,
+        )
+        result["name"] = data.name
 
-    moon_rashi_en = result["planets_en"]["Moon"]["sign"]
-    result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
+        moon_rashi_en = result["planets_en"]["Moon"]["sign"]
+        result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
 
-    # 2. Build HTML
-    html_content = build_pdf_html(result, data)
+        # 2. Build HTML
+        html_content = build_pdf_html(result, data)
 
-    # 3. Convert HTML to PDF Stream via xhtml2pdf
-    pdf_buffer = io.BytesIO()
-    pisa_status = pisa.CreatePDF(io.StringIO(html_content), dest=pdf_buffer)
+        # 3. Convert HTML to PDF Stream via xhtml2pdf
+        pdf_buffer = io.BytesIO()
+        pisa_status = pisa.CreatePDF(io.StringIO(html_content), dest=pdf_buffer)
 
-    if pisa_status.err:
-      raise Exception("HTML to PDF conversion failed")
+        if pisa_status.err:
+            raise Exception("HTML to PDF conversion failed")
 
-    # 4. Encode PDF bytes to Base64
-    pdf_base64 = base64.b64encode(pdf_buffer.getvalue()).decode("utf-8")
-    filename = f"Kundli_{data.name.replace(' ', '_')}.pdf"
+        # 4. Encode PDF bytes to Base64
+        pdf_base64 = base64.b64encode(pdf_buffer.getvalue()).decode("utf-8")
+        filename = f"Kundli_{data.name.replace(' ', '_')}.pdf"
 
-    # 5. Return JSON payload for mobile client
-    return {"status": "success", "filename": filename, "pdf_base64": pdf_base64}
-  except Exception as e:
-    raise HTTPException(status_code=400, detail=str(e))
+        # 5. Return JSON payload for mobile client
+        return {"status": "success", "filename": filename, "pdf_base64": pdf_base64}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =====================================================================
+# KOHINOOR ODIA CALENDAR ENDPOINT
+# =====================================================================
+@app.get("/api/odia-calendar")
+def fetch_odia_calendar(
+    date: str = "2026-08-11",
+    lat: float = 20.2961,
+    lon: float = 85.8245,
+    tz: float = 5.5,
+):
+    try:
+        data = get_kohinoor_odia_panchang(date_str=date, lat=lat, lon=lon, tz_offset=tz)
+        return {"status": "success", "data": data}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
