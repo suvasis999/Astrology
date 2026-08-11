@@ -3,7 +3,7 @@ uvicorn
 pydantic
 requests
 gTTS
-pypdf
+PyMuPDF
 pytesseract
-pdf2image
 Pillow
+google-cloud-vision

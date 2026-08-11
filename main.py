@@ -6,104 +6,43 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from pypdf import PdfReader
-
-# OCR and Image Processing Imports
-from pdf2image import convert_from_bytes
+from xhtml2pdf import pisa
+import fitz  # PyMuPDF
 import pytesseract
+from PIL import Image
 
-# Safe gTTS import
+# Safe gTTS Import
 try:
     from gTTS import gTTS
     GTTS_AVAILABLE = True
 except ImportError:
     gTTS = None
     GTTS_AVAILABLE = False
+    print("⚠️ gTTS package not found. Text-to-speech endpoint will return fallback error.")
 
-app = FastAPI(title="Vedic Astro & Odia OCR Engine")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-class PdfExtractRequest(BaseModel):
-    pdf_url: str
-    page_number: int = 1
+# Import local engines (Ensure these files exist in your directory)
+try:
+    from engine import calculate_astrology, get_daily_rashifal
+    from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
+except ImportError as e:
+    print(f"⚠️ Engine import warning: {e}")
 
 
-# =====================================================================
-# PDF TEXT EXTRACTION WITH AUTOMATIC OCR FALLBACK
-# =====================================================================
-@app.post("/api/extract-pdf-text")
-def extract_pdf_page_text(payload: PdfExtractRequest):
-    try:
-        res = requests.get(payload.pdf_url, timeout=20)
-        if res.status_code != 200:
-            raise HTTPException(status_code=400, detail="PDF download failed")
-
-        pdf_bytes = res.content
-        pdf_file = io.BytesIO(pdf_bytes)
-        reader = PdfReader(pdf_file)
-
-        total_pages = len(reader.pages)
-        page_idx = payload.page_number - 1
-
-        if page_idx < 0 or page_idx >= total_pages:
-            raise HTTPException(status_code=400, detail="Invalid page number")
-
-        # 1. Attempt digital text extraction
-        digital_text = reader.pages[page_idx].extract_text() or ""
-        clean_text = re.sub(r'\s+', ' ', digital_text).strip()
-
-        mode = "digital"
-
-        # 2. Fallback to Tesseract OCR if no digital text is found (< 15 chars)
-        if len(clean_text) < 15:
-            mode = "ocr"
-            try:
-                # Convert specific PDF page to PIL Image (200 DPI for clarity & speed)
-                images = convert_from_bytes(
-                    pdf_bytes,
-                    first_page=payload.page_number,
-                    last_page=payload.page_number,
-                    dpi=200
-                )
-
-                if images:
-                    # Perform OCR using Odia ('ori') and English ('eng') languages
-                    ocr_raw = pytesseract.image_to_string(images[0], lang='ori+eng')
-                    clean_text = re.sub(r'\s+', ' ', ocr_raw).strip()
-
-            except Exception as ocr_err:
-                print(f"⚠️ OCR Failed: {str(ocr_err)}")
-                clean_text = ""
-
-        return {
-            "status": "success",
-            "page": payload.page_number,
-            "total_pages": total_pages,
-            "text": clean_text,
-            "extraction_mode": mode
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Extraction error: {str(e)}")
-    
 # =====================================================================
 # ODIA NLP DICTIONARY ENGINE
 # =====================================================================
 ODIA_DICT = {}
 
 def load_odianlp_dictionary():
+    """Downloads & caches OdiaNLP dictionary from GitHub at startup."""
     global ODIA_DICT
     github_urls = [
         "https://raw.githubusercontent.com/OdiaNLP/dictionary/master/OdiaToEnglish.json",
         "https://raw.githubusercontent.com/OdiaNLP/dictionary/main/OdiaToEnglish.json",
+        "https://raw.githubusercontent.com/OdiaNLP/dictionary/master/dictionary.json",
+        "https://raw.githubusercontent.com/OdiaNLP/dictionary/main/dictionary.json",
     ]
+    
     for url in github_urls:
         try:
             res = requests.get(url, timeout=10)
@@ -111,141 +50,20 @@ def load_odianlp_dictionary():
                 data = res.json()
                 if isinstance(data, dict):
                     ODIA_DICT.update(data)
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            w = item.get("word") or item.get("odia")
+                            m = item.get("meaning") or item.get("english")
+                            if w and m:
+                                ODIA_DICT[w.strip()] = m
+                print(f"✅ Successfully loaded {len(ODIA_DICT)} entries from OdiaNLP dictionary.")
                 return
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Failed source {url}: {e}")
             continue
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    try:
-        load_odianlp_dictionary()
-    except Exception as e:
-        print(f"Dictionary warning: {e}")
-    yield
-
-app = FastAPI(title="Vedic Astro & Odia NLP Engine", lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# =====================================================================
-# PDF TEXT EXTRACTION
-# =====================================================================
-class PdfExtractRequest(BaseModel):
-    pdf_url: str
-    page_number: int = 1
-
-@app.post("/api/extract-pdf-text")
-def extract_pdf_page_text(payload: PdfExtractRequest):
-    try:
-        res = requests.get(payload.pdf_url, timeout=15)
-        if res.status_code != 200:
-            raise HTTPException(status_code=400, detail="PDF download failed")
-
-        pdf_file = io.BytesIO(res.content)
-        reader = PdfReader(pdf_file)
-
-        total_pages = len(reader.pages)
-        page_idx = payload.page_number - 1
-
-        if page_idx < 0 or page_idx >= total_pages:
-            raise HTTPException(status_code=400, detail="Invalid page number")
-
-        page_text = reader.pages[page_idx].extract_text() or ""
-        clean_text = re.sub(r'\s+', ' ', page_text).strip()
-
-        is_scanned = len(clean_text) < 10
-
-        return {
-            "status": "success",
-            "page": payload.page_number,
-            "total_pages": total_pages,
-            "text": clean_text,
-            "is_scanned": is_scanned
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF extraction error: {str(e)}")
-
-
-# =====================================================================
-# ROBUST ODIA TTS ENDPOINT
-# =====================================================================
-@app.post("/api/tts")
-def generate_odia_speech(payload: dict):
-    if not GTTS_AVAILABLE or gTTS is None:
-        raise HTTPException(
-            status_code=500,
-            detail="gTTS module missing on backend"
-        )
-
-    try:
-        raw_text = payload.get("text", "")
-        lang = payload.get("lang", "or")
-
-        if not raw_text or not raw_text.strip():
-            raise HTTPException(status_code=400, detail="Text cannot be empty")
-
-        # Clean non-printable characters & excessive spaces
-        clean_text = re.sub(r'[^\w\s\u0B00-\u0B7F.,!?-]', '', raw_text)
-        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-
-        if not clean_text:
-            clean_text = raw_text[:300]
-
-        # Chunk text to avoid gTTS timeouts
-        if len(clean_text) > 500:
-            clean_text = clean_text[:500] + "..."
-
-        tts = gTTS(text=clean_text, lang=lang, slow=False)
-        audio_buffer = io.BytesIO()
-        tts.write_to_fp(audio_buffer)
-
-        audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode("utf-8")
-        return {"status": "success", "audio_base64": audio_base64}
-
-    except Exception as e:
-        print(f"❌ TTS Backend Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"TTS Engine Error: {str(e)}")
-
-# =====================================================================
-# ODIA NLP DICTIONARY LOOKUP
-# =====================================================================
-@app.get("/api/word-details")
-def get_word_details(word: str):
-    try:
-        clean_word = word.strip()
-        if not clean_word:
-            return {"status": "error", "meaning": "ଶବ୍ଦ ଚୟନ କରନ୍ତୁ ।"}
-
-        if clean_word in ODIA_DICT:
-            meaning = ODIA_DICT[clean_word]
-            if isinstance(meaning, list):
-                meaning = ", ".join(meaning)
-            return {"status": "success", "word": clean_word, "meaning": meaning}
-
-        # Substring Search
-        for odia_key, val in ODIA_DICT.items():
-            if clean_word in odia_key or odia_key in clean_word:
-                meaning = val if isinstance(val, str) else ", ".join(val)
-                return {"status": "success", "word": clean_word, "meaning": f"{meaning} ({odia_key})"}
-
-        # Wiktionary Fallback
-        url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={clean_word}&format=json"
-        res = requests.get(url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
-        pages = res.json().get("query", {}).get("pages", {})
-        
-        for p_id, p_data in pages.items():
-            if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
-                return {"status": "success", "word": clean_word, "meaning": p_data["extract"].strip()}
-
-        return {"status": "success", "word": clean_word, "meaning": f"'{clean_word}' ଶବ୍ଦର ବିଶେଷ ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।"}
-    except Exception as e:
-        return {"status": "error", "word": word, "meaning": f"ଅର୍ଥ ଆଣିବାରେ ତ୍ରୁଟି: {str(e)}"}
+            
+    print("⚠️ OdiaNLP dictionary offline fallback enabled.")
 
 
 # =====================================================================
@@ -253,7 +71,7 @@ def get_word_details(word: str):
 # =====================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Load dictionary safely
+    # Startup: Load Odia dictionary into memory
     try:
         load_odianlp_dictionary()
     except Exception as e:
@@ -261,7 +79,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Vedic Astro Engine & Odia NLP API", lifespan=lifespan)
+app = FastAPI(title="Vedic Astro Engine & Odia NLP OCR API", lifespan=lifespan)
 
 # =====================================================================
 # CORS MIDDLEWARE SETUP
@@ -276,7 +94,7 @@ app.add_middleware(
 
 
 # =====================================================================
-# REQUEST PYDANTIC MODEL
+# PYDANTIC REQUEST MODELS
 # =====================================================================
 class BirthDataRequest(BaseModel):
     name: str = Field("Rahul Sharma", example="Rahul Sharma")
@@ -289,14 +107,19 @@ class BirthDataRequest(BaseModel):
     lang: str = Field("en", example="or")
 
 
+class PdfExtractRequest(BaseModel):
+    pdf_url: str
+    page_number: int = 1
+
+
 # =====================================================================
-# HEALTH CHECK
+# HEALTH CHECK ENDPOINT
 # =====================================================================
 @app.get("/")
 def health_check():
     return {
         "status": "ok",
-        "message": "Vedic Astro Engine Server Running",
+        "message": "Vedic Astro Engine & Odia OCR Server Running",
         "gtts_enabled": GTTS_AVAILABLE,
         "dictionary_entries": len(ODIA_DICT),
     }
@@ -521,6 +344,66 @@ def fetch_odia_calendar_month(
 
 
 # =====================================================================
+# PDF TEXT EXTRACTION WITH PyMuPDF & TESSERACT OCR FALLBACK
+# =====================================================================
+@app.post("/api/extract-pdf-text")
+def extract_pdf_page_text(payload: PdfExtractRequest):
+    """
+    1. Digital Text Extraction via PyMuPDF (Instant & Memory Safe).
+    2. Automatic Tesseract OCR (ori+eng) for Scanned PDF pages.
+    """
+    try:
+        res = requests.get(payload.pdf_url, timeout=20)
+        if res.status_code != 200:
+            raise HTTPException(status_code=400, detail="PDF download failed")
+
+        pdf_bytes = res.content
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        total_pages = len(doc)
+        page_idx = payload.page_number - 1
+
+        if page_idx < 0 or page_idx >= total_pages:
+            raise HTTPException(status_code=400, detail="Invalid page number")
+
+        page = doc[page_idx]
+
+        # 1. Digital Text Extraction
+        digital_text = page.get_text("text") or ""
+        clean_text = re.sub(r'\s+', ' ', digital_text).strip()
+
+        mode = "digital"
+
+        # 2. OCR Fallback if text is sparse (< 15 chars)
+        if len(clean_text) < 15:
+            mode = "ocr"
+            try:
+                # Render PDF page to image with 1.5x scale
+                pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5))
+                img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+                # Run Tesseract with Odia ('ori') and English ('eng')
+                ocr_raw = pytesseract.image_to_string(img, lang='ori+eng')
+                clean_text = re.sub(r'\s+', ' ', ocr_raw).strip()
+
+            except Exception as ocr_err:
+                print(f"❌ OCR Failure: {str(ocr_err)}")
+                clean_text = ""
+
+        return {
+            "status": "success",
+            "page": payload.page_number,
+            "total_pages": total_pages,
+            "text": clean_text,
+            "extraction_mode": mode
+        }
+
+    except Exception as e:
+        print(f"❌ PDF Extraction Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Extraction error: {str(e)}")
+
+
+# =====================================================================
 # ODIA NLP DICTIONARY LOOKUP ENDPOINT
 # =====================================================================
 @app.get("/api/word-details")
@@ -543,7 +426,7 @@ def get_word_details(word: str):
                 "source": "OdiaNLP"
             }
 
-        # 2. Fuzzy/Substring Search in OdiaNLP Dictionary
+        # 2. Substring Match in OdiaNLP Dictionary
         for odia_key, val in ODIA_DICT.items():
             if clean_word in odia_key or odia_key in clean_word:
                 meaning = val if isinstance(val, str) else ", ".join(val)
@@ -585,7 +468,7 @@ def get_word_details(word: str):
 
 
 # =====================================================================
-# ODIA TEXT-TO-SPEECH (TTS) ENDPOINT (Sanitized & Truncated)
+# ODIA TEXT-TO-SPEECH (TTS) ENDPOINT
 # =====================================================================
 @app.post("/api/tts")
 def generate_odia_speech(payload: dict):
@@ -603,12 +486,16 @@ def generate_odia_speech(payload: dict):
         if not raw_text or not raw_text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-        # Clean extra spaces, newlines, and control characters
-        clean_text = re.sub(r'\s+', ' ', raw_text).strip()
+        # Clean non-printable characters & excessive spaces
+        clean_text = re.sub(r'[^\w\s\u0B00-\u0B7F.,!?-]', '', raw_text)
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
 
-        # Limit to 800 characters max per chunk to prevent gTTS timeout/crash
-        if len(clean_text) > 800:
-            clean_text = clean_text[:800] + "..."
+        if not clean_text:
+            clean_text = raw_text[:300]
+
+        # Limit to 500 characters max per chunk to prevent gTTS timeout
+        if len(clean_text) > 500:
+            clean_text = clean_text[:500] + "..."
 
         tts = gTTS(text=clean_text, lang=lang, slow=False)
         audio_buffer = io.BytesIO()
@@ -618,4 +505,5 @@ def generate_odia_speech(payload: dict):
         return {"status": "success", "audio_base64": audio_base64}
 
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"❌ TTS Backend Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"TTS Engine Error: {str(e)}")
