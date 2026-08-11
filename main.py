@@ -2,17 +2,14 @@ import base64
 import io
 import re
 import requests
+from typing import Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
+
+from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
 import fitz  # PyMuPDF
-import pytesseract
-from PIL import Image
-
-from typing import Optional
-from fastapi import File, UploadFile, Form
 
 # Safe gTTS Import
 try:
@@ -23,7 +20,7 @@ except ImportError:
     GTTS_AVAILABLE = False
     print("⚠️ gTTS package not found. Text-to-speech endpoint will return fallback error.")
 
-# Import local engines (Ensure these files exist in your directory)
+# Import local engines (Ensure engine.py and odia_calendar.py are present in your backend directory)
 try:
     from engine import calculate_astrology, get_daily_rashifal
     from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
@@ -32,12 +29,26 @@ except ImportError as e:
 
 
 # =====================================================================
+# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE ERRORS)
+# =====================================================================
+def sanitize_response(data):
+    """Recursively converts bytes to base64 strings to ensure UTF-8 JSON compliance."""
+    if isinstance(data, dict):
+        return {k: sanitize_response(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_response(i) for i in data]
+    elif isinstance(data, bytes):
+        return base64.b64encode(data).decode('utf-8')
+    return data
+
+
+# =====================================================================
 # ODIA NLP DICTIONARY ENGINE
 # =====================================================================
 ODIA_DICT = {}
 
 def load_odianlp_dictionary():
-    """Downloads & caches OdiaNLP dictionary from GitHub at startup."""
+    """Downloads & caches OdiaNLP dictionary dataset from GitHub at startup."""
     global ODIA_DICT
     github_urls = [
         "https://raw.githubusercontent.com/OdiaNLP/dictionary/master/OdiaToEnglish.json",
@@ -74,7 +85,6 @@ def load_odianlp_dictionary():
 # =====================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Load Odia dictionary into memory
     try:
         load_odianlp_dictionary()
     except Exception as e:
@@ -120,25 +130,18 @@ class PdfExtractRequest(BaseModel):
 # =====================================================================
 @app.get("/")
 def health_check():
-    # Diagnostic checks
     try:
         import fitz
         fitz_ok = True
     except:
         fitz_ok = False
         
-    try:
-        import pytesseract
-        tess_ok = True
-    except:
-        tess_ok = False
-        
     return {
         "status": "ok",
         "gtts_installed": GTTS_AVAILABLE,
         "fitz_installed": fitz_ok,
-        "tesseract_installed": tess_ok,
-        "message": "Vedic Astro Engine Running"
+        "dictionary_entries": len(ODIA_DICT),
+        "message": "Vedic Astro Engine & Odia NLP API Running"
     }
 
 
@@ -162,13 +165,13 @@ def calculate_kundli(data: BirthDataRequest):
         moon_rashi_en = result["planets_en"]["Moon"]["sign"]
         result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
 
-        return result
+        return sanitize_response(result)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 # =====================================================================
-# HTML TEMPLATE BUILDER FOR PDF
+# HTML TEMPLATE BUILDER FOR PDF EXPORT
 # =====================================================================
 def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
     planet_rows = ""
@@ -323,7 +326,7 @@ def export_kundli_pdf(data: BirthDataRequest):
         pdf_base64 = base64.b64encode(pdf_buffer.getvalue()).decode("utf-8")
         filename = f"Kundli_{data.name.replace(' ', '_')}.pdf"
 
-        return {"status": "success", "filename": filename, "pdf_base64": pdf_base64}
+        return sanitize_response({"status": "success", "filename": filename, "pdf_base64": pdf_base64})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -340,7 +343,7 @@ def fetch_odia_calendar(
 ):
     try:
         data = get_kohinoor_odia_panchang(date_str=date, lat=lat, lon=lon, tz_offset=tz)
-        return {"status": "success", "data": data}
+        return sanitize_response({"status": "success", "data": data})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -355,47 +358,25 @@ def fetch_odia_calendar_month(
 ):
     try:
         data = get_kohinoor_month_calendar(year=year, month=month, lat=lat, lon=lon, tz_offset=tz)
-        return {"status": "success", "data": data}
+        return sanitize_response({"status": "success", "data": data})
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 # =====================================================================
-# PDF TEXT EXTRACTION WITH PyMuPDF & TESSERACT OCR FALLBACK
+# PDF TEXT EXTRACTION ENDPOINT (HANDLES FILE UPLOADS & REMOTE URLS)
 # =====================================================================
-# Use this simplified OCR logic in main.py
-# 1. Add this helper function at the top of your file
-def sanitize_response(data):
-    """Recursively converts bytes to base64 strings."""
-    if isinstance(data, dict):
-        return {k: sanitize_response(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [sanitize_response(i) for i in data]
-    elif isinstance(data, bytes):
-        return base64.b64encode(data).decode('utf-8')
-    return data
-
-
-
 @app.post("/api/extract-pdf-text")
 async def extract_pdf_page_text(
     pdf_url: Optional[str] = Form(None),
     page_number: int = Form(1),
     pdf: Optional[UploadFile] = File(None)
 ):
-    """
-    Handles both:
-    1. Remote URL via JSON/Form (e.g. https://odiabook.com/...)
-    2. Local File binary upload via Multipart FormData (file:// or content://)
-    """
     try:
         pdf_bytes = None
 
-        # Case A: Local file uploaded as multipart/form-data
         if pdf is not None:
             pdf_bytes = await pdf.read()
-        
-        # Case B: Remote URL passed
         elif pdf_url:
             if not pdf_url.lower().startswith("http"):
                 raise HTTPException(status_code=400, detail="Invalid URL format.")
@@ -406,7 +387,6 @@ async def extract_pdf_page_text(
         else:
             raise HTTPException(status_code=400, detail="No PDF source provided.")
 
-        # Open PDF with PyMuPDF
         doc = fitz.open(stream=io.BytesIO(pdf_bytes), filetype="pdf")
         
         if page_number - 1 < 0 or page_number - 1 >= len(doc):
@@ -432,58 +412,122 @@ async def extract_pdf_page_text(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(sanitize_response(str(e))))
+
+
 # =====================================================================
-# ODIA NLP DICTIONARY LOOKUP ENDPOINT
+# ADVANCED ODIA NLP & DYNAMIC TRANSLATION DICTIONARY ENDPOINT
 # =====================================================================
 @app.get("/api/word-details")
 def get_word_details(word: str):
-    """Looks up Odia word meanings in OdiaNLP dictionary with Wiktionary fallback."""
+    """
+    Multi-stage word details engine:
+    1. Direct OdiaNLP lookup
+    2. Case-insensitive key lookup
+    3. Reverse English-to-Odia search (e.g. searching 'major')
+    4. Suffix stripping for inflected Odia words
+    5. Dynamic MyMemory Translation API fallback (Guarantees results for ANY word)
+    6. Wiktionary fallback
+    """
     try:
-        clean_word = word.strip()
+        clean_word = word.strip().strip(".,!?:;\"'()[]{}«»")
         if not clean_word:
             return {"status": "error", "meaning": "ଶବ୍ଦ ଚୟନ କରନ୍ତୁ ।"}
 
-        # 1. Exact Match in OdiaNLP Dictionary
+        # Stage 1: Exact Match in OdiaNLP Dictionary
         if clean_word in ODIA_DICT:
-            meaning = ODIA_DICT[clean_word]
-            if isinstance(meaning, list):
-                meaning = ", ".join(meaning)
+            val = ODIA_DICT[clean_word]
+            meaning_str = ", ".join(val) if isinstance(val, list) else str(val)
             return {
                 "status": "success",
                 "word": clean_word,
-                "meaning": meaning,
-                "source": "OdiaNLP"
+                "meaning": meaning_str,
+                "source": "OdiaNLP Exact"
             }
 
-        # 2. Substring Match in OdiaNLP Dictionary
-        for odia_key, val in ODIA_DICT.items():
-            if clean_word in odia_key or odia_key in clean_word:
-                meaning = val if isinstance(val, str) else ", ".join(val)
+        # Stage 2: Case-insensitive key match
+        lower_word = clean_word.lower()
+        for k, v in ODIA_DICT.items():
+            if k.lower() == lower_word:
+                meaning_str = ", ".join(v) if isinstance(v, list) else str(v)
                 return {
                     "status": "success",
-                    "word": clean_word,
-                    "meaning": f"{meaning} ({odia_key})",
-                    "source": "OdiaNLP Fuzzy"
+                    "word": k,
+                    "meaning": meaning_str,
+                    "source": "OdiaNLP Key"
                 }
 
-        # 3. Fallback: Query Wiktionary
-        url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={clean_word}&format=json"
-        res = requests.get(url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
-        pages = res.json().get("query", {}).get("pages", {})
+        # Stage 3: Reverse English-to-Odia Search (For English words like "major")
+        english_matches = []
+        for odia_k, eng_v in ODIA_DICT.items():
+            eng_str = ", ".join(eng_v) if isinstance(eng_v, list) else str(eng_v)
+            if lower_word in eng_str.lower().split():
+                english_matches.append(f"• {odia_k}: {eng_str}")
+                if len(english_matches) >= 4:
+                    break
+        if english_matches:
+            return {
+                "status": "success",
+                "word": clean_word,
+                "meaning": "ଓଡ଼ିଆ ଅର୍ଥ (Matches):\n" + "\n".join(english_matches),
+                "source": "OdiaNLP English Search"
+            }
+
+        # Stage 4: Odia Grammatical Suffix Stripping
+        suffixes = ["ମାନଙ୍କର", "ମାନଙ୍କୁ", "ମାନଙ୍କ", "ଠାରୁ", "ମାନେ", "ଙ୍କର", "ଙ୍କୁ", "କୁ", "ରେ", "ର", "ଟି", "ଟା", "ଏ", "ଙ୍କ"]
+        for suffix in sorted(suffixes, key=len, reverse=True):
+            if clean_word.endswith(suffix) and len(clean_word) > len(suffix):
+                stem = clean_word[:-len(suffix)]
+                if stem in ODIA_DICT:
+                    val = ODIA_DICT[stem]
+                    meaning_str = ", ".join(val) if isinstance(val, list) else str(val)
+                    return {
+                        "status": "success",
+                        "word": clean_word,
+                        "meaning": f"{meaning_str} (ମୂଳ ଶବ୍ଦ: {stem})",
+                        "source": "OdiaNLP Stemmed"
+                    }
+
+        # Stage 5: High-Accuracy Dynamic Translation API (MyMemory)
+        is_english = all(ord(c) < 128 for c in clean_word if c.isalpha())
+        langpair = "en|or" if is_english else "or|en"
         
-        for p_id, p_data in pages.items():
-            if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
-                return {
-                    "status": "success",
-                    "word": clean_word,
-                    "meaning": p_data["extract"].strip(),
-                    "source": "Wiktionary"
-                }
+        try:
+            api_url = f"https://api.my-memory.translated.net/get?q={requests.utils.quote(clean_word)}&langpair={langpair}"
+            res = requests.get(api_url, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                translated = data.get("responseData", {}).get("translatedText", "")
+                if translated and "MYMEMORY WARNING" not in translated and translated.lower() != clean_word.lower():
+                    label = "ଓଡ଼ିଆ ଅନୁବାଦ:" if is_english else "English Meaning:"
+                    return {
+                        "status": "success",
+                        "word": clean_word,
+                        "meaning": f"{label}\n{translated}",
+                        "source": "Translation Engine"
+                    }
+        except Exception as e:
+            print(f"⚠️ Translation API error: {e}")
+
+        # Stage 6: Wiktionary Fallback
+        try:
+            url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={requests.utils.quote(clean_word)}&format=json"
+            res_wik = requests.get(url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
+            pages = res_wik.json().get("query", {}).get("pages", {})
+            for p_id, p_data in pages.items():
+                if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
+                    return {
+                        "status": "success",
+                        "word": clean_word,
+                        "meaning": p_data["extract"].strip(),
+                        "source": "Wiktionary"
+                    }
+        except Exception as e:
+            print(f"⚠️ Wiktionary error: {e}")
 
         return {
             "status": "success",
             "word": clean_word,
-            "meaning": f"'{clean_word}' ଶବ୍ଦର ବିଶେଷ ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।",
+            "meaning": f"'{clean_word}' ଶବ୍ଦର ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।",
             "source": "None"
         }
 
@@ -501,11 +545,10 @@ def get_word_details(word: str):
 # =====================================================================
 @app.post("/api/tts")
 def generate_odia_speech(payload: dict):
-    """Converts Odia text to Base64 MP3 Audio safely."""
     if not GTTS_AVAILABLE or gTTS is None:
         raise HTTPException(
             status_code=500,
-            detail="gTTS package is not installed on the server. Ensure gTTS is listed in requirements.txt on Render."
+            detail="gTTS package is not installed on the server."
         )
 
     try:
@@ -515,14 +558,12 @@ def generate_odia_speech(payload: dict):
         if not raw_text or not raw_text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-        # Clean non-printable characters & excessive spaces
         clean_text = re.sub(r'[^\w\s\u0B00-\u0B7F.,!?-]', '', raw_text)
         clean_text = re.sub(r'\s+', ' ', clean_text).strip()
 
         if not clean_text:
             clean_text = raw_text[:300]
 
-        # Limit to 500 characters max per chunk to prevent gTTS timeout
         if len(clean_text) > 500:
             clean_text = clean_text[:500] + "..."
 
@@ -531,8 +572,7 @@ def generate_odia_speech(payload: dict):
         tts.write_to_fp(audio_buffer)
 
         audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode("utf-8")
-        return {"status": "success", "audio_base64": audio_base64}
+        return sanitize_response({"status": "success", "audio_base64": audio_base64})
 
     except Exception as e:
-        print(f"❌ TTS Backend Error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"TTS Engine Error: {str(e)}")
