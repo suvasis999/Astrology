@@ -361,6 +361,18 @@ def fetch_odia_calendar_month(
 # PDF TEXT EXTRACTION WITH PyMuPDF & TESSERACT OCR FALLBACK
 # =====================================================================
 # Use this simplified OCR logic in main.py
+# 1. Add this helper function at the top of your file
+def sanitize_response(data):
+    """Recursively converts bytes to base64 strings."""
+    if isinstance(data, dict):
+        return {k: sanitize_response(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitize_response(i) for i in data]
+    elif isinstance(data, bytes):
+        return base64.b64encode(data).decode('utf-8')
+    return data
+
+
 @app.post("/api/extract-pdf-text")
 def extract_pdf_page_text(payload: PdfExtractRequest):
     # 1. Strict Validation: Backend ONLY works with web URLs
@@ -385,6 +397,7 @@ def extract_pdf_page_text(payload: PdfExtractRequest):
 
         # If scanned (OCR), call OCR.space API
         if len(text) < 15:
+            # 2.0x scaling for better accuracy
             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
             img_bytes = pix.tobytes("png")
             
@@ -392,7 +405,7 @@ def extract_pdf_page_text(payload: PdfExtractRequest):
                 "https://api.ocr.space/parse/image",
                 files={"page.png": ("page.png", img_bytes, "image/png")},
                 data={
-                    "apikey": "K82596486888957", # Use your own key
+                    "apikey": "K82596486888957", 
                     "language": "ori",
                     "isOverlayRequired": "false"
                 },
@@ -404,9 +417,13 @@ def extract_pdf_page_text(payload: PdfExtractRequest):
             else:
                 text = "ସ୍କାନ୍ ହୋଇଥିବା ପୃଷ୍ଠାରୁ ଲେଖା ମିଳିଲା ନାହିଁ ।"
 
-        return {"status": "success", "text": text}
+        # Return sanitized dictionary to prevent UnicodeDecodeError
+        return sanitize_response({"status": "success", "text": text})
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # We sanitize the error detail just in case the error object contains bytes
+        raise HTTPException(status_code=500, detail=str(sanitize_response(str(e))))
+    
 # =====================================================================
 # ODIA NLP DICTIONARY LOOKUP ENDPOINT
 # =====================================================================
