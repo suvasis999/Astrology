@@ -1,16 +1,17 @@
 import base64
 import io
+import re
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
-from gtts import gTTS
-import requests
+from gTTS import gTTS
 
 from engine import calculate_astrology, get_daily_rashifal
 from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
 
-app = FastAPI(title="Vedic Astro Engine API")
+app = FastAPI(title="Vedic Astro Engine & Odia NLP API")
 
 # =====================================================================
 # CORS MIDDLEWARE SETUP
@@ -25,6 +26,45 @@ app.add_middleware(
 
 
 # =====================================================================
+# ODIA NLP DICTIONARY ENGINE (Loaded from OdiaNLP/dictionary GitHub)
+# =====================================================================
+ODIA_DICT = {}
+
+def load_odianlp_dictionary():
+    """Downloads & caches OdiaNLP dictionary from GitHub at startup."""
+    global ODIA_DICT
+    github_urls = [
+        "https://raw.githubusercontent.com/OdiaNLP/dictionary/master/OdiaToEnglish.json",
+        "https://raw.githubusercontent.com/OdiaNLP/dictionary/main/OdiaToEnglish.json",
+        "https://raw.githubusercontent.com/OdiaNLP/dictionary/master/dictionary.json",
+        "https://raw.githubusercontent.com/OdiaNLP/dictionary/main/dictionary.json",
+    ]
+    
+    for url in github_urls:
+        try:
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if isinstance(data, dict):
+                    ODIA_DICT.update(data)
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            w = item.get("word") or item.get("odia")
+                            m = item.get("meaning") or item.get("english")
+                            if w and m:
+                                ODIA_DICT[w.strip()] = m
+                print(f"✅ Loaded {len(ODIA_DICT)} entries from OdiaNLP dictionary.")
+                return
+        except Exception:
+            continue
+            
+    print("⚠️ OdiaNLP online dictionary fallback enabled.")
+
+load_odianlp_dictionary()
+
+
+# =====================================================================
 # REQUEST PYDANTIC MODEL
 # =====================================================================
 class BirthDataRequest(BaseModel):
@@ -35,7 +75,7 @@ class BirthDataRequest(BaseModel):
     longitude: float = Field(..., example=77.2090)
     tz_offset: float = Field(..., example=5.5)
     ayanamsha: str = Field("LAHIRI", example="LAHIRI")
-    lang: str = Field("en", example="or")  # Options: "en", "hi", or "or"
+    lang: str = Field("en", example="or")
 
 
 # =====================================================================
@@ -63,8 +103,6 @@ def calculate_kundli(data: BirthDataRequest):
         )
 
         result["name"] = data.name
-
-        # Get localized Daily Rashifal
         moon_rashi_en = result["planets_en"]["Moon"]["sign"]
         result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
 
@@ -77,9 +115,6 @@ def calculate_kundli(data: BirthDataRequest):
 # HTML TEMPLATE BUILDER FOR PDF
 # =====================================================================
 def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
-    """Generates clean HTML styled for A4 PDF rendering via xhtml2pdf."""
-
-    # Planetary Table Rows
     planet_rows = ""
     for p_name, p in result.get("planets", {}).items():
         planet_rows += f"""
@@ -93,14 +128,9 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         </tr>
         """
 
-    # Vimshottari Dasha Rows
     dasha_rows = ""
     for d in result.get("dasha", []):
-        bg_style = (
-            "background-color: #fff7ed; font-weight: bold;"
-            if d.get("is_active")
-            else ""
-        )
+        bg_style = "background-color: #fff7ed; font-weight: bold;" if d.get("is_active") else ""
         active_tag = " (CURRENT)" if d.get("is_active") else ""
         dasha_rows += f"""
         <tr style="{bg_style}">
@@ -111,7 +141,6 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         </tr>
         """
 
-    # Panchanga Details
     panchanga = result.get("panchanga", {})
 
     html = f"""
@@ -120,77 +149,19 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
     <head>
         <meta charset="utf-8">
         <style>
-            @page {{
-                size: A4;
-                margin: 15mm;
-            }}
-            body {{
-                font-family: Helvetica, Arial, sans-serif;
-                color: #1e293b;
-                font-size: 11px;
-            }}
-            .header {{
-                text-align: center;
-                border-bottom: 2px solid #b71c1c;
-                padding-bottom: 8px;
-                margin-bottom: 15px;
-            }}
-            .title {{
-                font-size: 20px;
-                font-weight: bold;
-                color: #b71c1c;
-                margin: 0;
-            }}
-            .subtitle {{
-                font-size: 10px;
-                color: #64748b;
-                margin-top: 3px;
-            }}
-            .info-box {{
-                background-color: #fffbeb;
-                border: 1px solid #fde68a;
-                padding: 10px;
-                margin-bottom: 15px;
-            }}
-            .info-table {{
-                width: 100%;
-                border-collapse: collapse;
-            }}
-            .info-table td {{
-                padding: 4px;
-                border: none;
-            }}
-            .section-header {{
-                font-size: 13px;
-                font-weight: bold;
-                color: #b71c1c;
-                border-bottom: 1px solid #fecaca;
-                padding-bottom: 3px;
-                margin-top: 15px;
-                margin-bottom: 8px;
-            }}
-            table.data-table {{
-                width: 100%;
-                border-collapse: collapse;
-                margin-bottom: 12px;
-            }}
-            table.data-table th {{
-                background-color: #b71c1c;
-                color: #ffffff;
-                padding: 6px;
-                text-align: left;
-                font-size: 10px;
-            }}
-            table.data-table td {{
-                border-bottom: 1px solid #e2e8f0;
-                font-size: 10px;
-            }}
-            .rashifal-card {{
-                background-color: #f8fafc;
-                border: 1px solid #e2e8f0;
-                padding: 10px;
-                margin-top: 8px;
-            }}
+            @page {{ size: A4; margin: 15mm; }}
+            body {{ font-family: Helvetica, Arial, sans-serif; color: #1e293b; font-size: 11px; }}
+            .header {{ text-align: center; border-bottom: 2px solid #b71c1c; padding-bottom: 8px; margin-bottom: 15px; }}
+            .title {{ font-size: 20px; font-weight: bold; color: #b71c1c; margin: 0; }}
+            .subtitle {{ font-size: 10px; color: #64748b; margin-top: 3px; }}
+            .info-box {{ background-color: #fffbeb; border: 1px solid #fde68a; padding: 10px; margin-bottom: 15px; }}
+            .info-table {{ width: 100%; border-collapse: collapse; }}
+            .info-table td {{ padding: 4px; border: none; }}
+            .section-header {{ font-size: 13px; font-weight: bold; color: #b71c1c; border-bottom: 1px solid #fecaca; padding-bottom: 3px; margin-top: 15px; margin-bottom: 8px; }}
+            table.data-table {{ width: 100%; border-collapse: collapse; margin-bottom: 12px; }}
+            table.data-table th {{ background-color: #b71c1c; color: #ffffff; padding: 6px; text-align: left; font-size: 10px; }}
+            table.data-table td {{ border-bottom: 1px solid #e2e8f0; font-size: 10px; }}
+            .rashifal-card {{ background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; margin-top: 8px; }}
         </style>
     </head>
     <body>
@@ -271,7 +242,6 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 @app.post("/api/export-pdf")
 def export_kundli_pdf(data: BirthDataRequest):
     try:
-        # 1. Compute Kundli Data
         result = calculate_astrology(
             date_str=data.date,
             time_str=data.time,
@@ -286,21 +256,17 @@ def export_kundli_pdf(data: BirthDataRequest):
         moon_rashi_en = result["planets_en"]["Moon"]["sign"]
         result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
 
-        # 2. Build HTML
         html_content = build_pdf_html(result, data)
 
-        # 3. Convert HTML to PDF Stream via xhtml2pdf
         pdf_buffer = io.BytesIO()
         pisa_status = pisa.CreatePDF(io.StringIO(html_content), dest=pdf_buffer)
 
         if pisa_status.err:
             raise Exception("HTML to PDF conversion failed")
 
-        # 4. Encode PDF bytes to Base64
         pdf_base64 = base64.b64encode(pdf_buffer.getvalue()).decode("utf-8")
         filename = f"Kundli_{data.name.replace(' ', '_')}.pdf"
 
-        # 5. Return JSON payload for mobile client
         return {"status": "success", "filename": filename, "pdf_base64": pdf_base64}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -339,62 +305,97 @@ def fetch_odia_calendar_month(
 
 
 # =====================================================================
-# 1. FREE ODIA NLP / WORD DETAILS LOOKUP ENDPOINT
+# ODIA NLP DICTIONARY LOOKUP ENDPOINT
 # =====================================================================
 @app.get("/api/word-details")
 def get_word_details(word: str):
-  """Looks up Odia word meanings via Odia Wiktionary / Free API."""
-  try:
-    clean_word = word.strip()
+    """
+    Looks up Odia word meanings in OdiaNLP dictionary with Wiktionary fallback.
+    """
+    try:
+        clean_word = word.strip()
+        if not clean_word:
+            return {"status": "error", "meaning": "ଶବ୍ଦ ଚୟନ କରନ୍ତୁ ।"}
 
-    # Query Odia Wiktionary API
-    url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={clean_word}&format=json"
-    headers = {"User-Agent": "OdiaPdfReaderApp/1.0"}
+        # 1. Exact Match in OdiaNLP Dictionary
+        if clean_word in ODIA_DICT:
+            meaning = ODIA_DICT[clean_word]
+            if isinstance(meaning, list):
+                meaning = ", ".join(meaning)
+            return {
+                "status": "success",
+                "word": clean_word,
+                "meaning": meaning,
+                "source": "OdiaNLP"
+            }
 
-    response = requests.get(url, headers=headers, timeout=5)
-    data = response.json()
+        # 2. Fuzzy/Substring Search in OdiaNLP Dictionary
+        for odia_key, val in ODIA_DICT.items():
+            if clean_word in odia_key or odia_key in clean_word:
+                meaning = val if isinstance(val, str) else ", ".join(val)
+                return {
+                    "status": "success",
+                    "word": clean_word,
+                    "meaning": f"{meaning} ({odia_key})",
+                    "source": "OdiaNLP Fuzzy"
+                }
 
-    pages = data.get("query", {}).get("pages", {})
-    meaning = None
+        # 3. Fallback: Query Wiktionary
+        url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={clean_word}&format=json"
+        res = requests.get(url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
+        pages = res.json().get("query", {}).get("pages", {})
+        
+        for p_id, p_data in pages.items():
+            if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
+                return {
+                    "status": "success",
+                    "word": clean_word,
+                    "meaning": p_data["extract"].strip(),
+                    "source": "Wiktionary"
+                }
 
-    for page_id, page_data in pages.items():
-      if page_id != "-1" and "extract" in page_data:
-        meaning = page_data["extract"]
-        break
+        return {
+            "status": "success",
+            "word": clean_word,
+            "meaning": f"'{clean_word}' ଶବ୍ଦର ବିଶେଷ ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।",
+            "source": "None"
+        }
 
-    if not meaning:
-      meaning = f"'{clean_word}' ଶବ୍ଦର ବିଶେଷ ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।"
-
-    return {"status": "success", "word": clean_word, "meaning": meaning}
-  except Exception as e:
-    return {
-        "status": "error",
-        "word": word,
-        "meaning": f"Error looking up word: {str(e)}",
-    }
+    except Exception as e:
+        return {
+            "status": "error",
+            "word": word,
+            "meaning": f"ଅର୍ଥ ଆଣିବାରେ ତ୍ରୁଟି: {str(e)}",
+            "source": "Error"
+        }
 
 
 # =====================================================================
-# 2. FREE ODIA TEXT-TO-SPEECH (TTS) ENDPOINT
+# ODIA TEXT-TO-SPEECH (TTS) ENDPOINT (Sanitized & Truncated)
 # =====================================================================
 @app.post("/api/tts")
 def generate_odia_speech(payload: dict):
-  """Converts Odia sentence to Base64 MP3 Audio using free gTTS."""
-  try:
-    text = payload.get("text", "")
-    lang = payload.get("lang", "or")  # 'or' is Odia language code
+    """Converts Odia text to Base64 MP3 Audio safely."""
+    try:
+        raw_text = payload.get("text", "")
+        lang = payload.get("lang", "or")
 
-    if not text.strip():
-      raise HTTPException(status_code=400, detail="Text cannot be empty")
+        if not raw_text or not raw_text.strip():
+            raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-    # Generate MP3 stream using gTTS (100% Free)
-    tts = gTTS(text=text, lang=lang, slow=False)
-    audio_buffer = io.BytesIO()
-    tts.write_to_fp(audio_buffer)
+        # Clean spaces, newlines, and control characters
+        clean_text = re.sub(r'\s+', ' ', raw_text).strip()
 
-    # Encode MP3 bytes to Base64
-    audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode("utf-8")
+        # Limit to 800 characters max per chunk to prevent gTTS timeout/crash
+        if len(clean_text) > 800:
+            clean_text = clean_text[:800] + "..."
 
-    return {"status": "success", "audio_base64": audio_base64}
-  except Exception as e:
-    raise HTTPException(status_code=400, detail=str(e))
+        tts = gTTS(text=clean_text, lang=lang, slow=False)
+        audio_buffer = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
+
+        audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode("utf-8")
+        return {"status": "success", "audio_base64": audio_base64}
+
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
