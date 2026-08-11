@@ -1,4 +1,6 @@
 fastapi
 uvicorn
-pyswisseph
 pydantic
+pyswisseph
+xhtml2pdf
+
