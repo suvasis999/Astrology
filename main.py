@@ -117,11 +117,25 @@ class PdfExtractRequest(BaseModel):
 # =====================================================================
 @app.get("/")
 def health_check():
+    # Diagnostic checks
+    try:
+        import fitz
+        fitz_ok = True
+    except:
+        fitz_ok = False
+        
+    try:
+        import pytesseract
+        tess_ok = True
+    except:
+        tess_ok = False
+        
     return {
         "status": "ok",
-        "message": "Vedic Astro Engine & Odia OCR Server Running",
-        "gtts_enabled": GTTS_AVAILABLE,
-        "dictionary_entries": len(ODIA_DICT),
+        "gtts_installed": GTTS_AVAILABLE,
+        "fitz_installed": fitz_ok,
+        "tesseract_installed": tess_ok,
+        "message": "Vedic Astro Engine Running"
     }
 
 
@@ -349,59 +363,41 @@ def fetch_odia_calendar_month(
 @app.post("/api/extract-pdf-text")
 def extract_pdf_page_text(payload: PdfExtractRequest):
     try:
+        # Check if required libraries exist
+        try:
+            import fitz
+        except ImportError:
+            raise HTTPException(status_code=500, detail="PyMuPDF (fitz) is not installed.")
+
         res = requests.get(payload.pdf_url, timeout=20)
         if res.status_code != 200:
             raise HTTPException(status_code=400, detail="PDF download failed")
 
-        pdf_bytes = res.content
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-
-        total_pages = len(doc)
-        page_idx = payload.page_number - 1
-
-        if page_idx < 0 or page_idx >= total_pages:
-            raise HTTPException(status_code=400, detail="Invalid page number")
-
-        page = doc[page_idx]
-
-        # 1. Digital Text Extraction
+        doc = fitz.open(stream=io.BytesIO(res.content), filetype="pdf")
+        page = doc[payload.page_number - 1]
+        
+        # Digital Text
         digital_text = page.get_text("text") or ""
         clean_text = re.sub(r'\s+', ' ', digital_text).strip()
 
-        mode = "digital"
-
-        # 2. OCR Fallback
+        # Fallback to OCR only if it exists
         if len(clean_text) < 15:
-            mode = "ocr"
             try:
+                import pytesseract
+                from PIL import Image
                 pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
                 img = Image.open(io.BytesIO(pix.tobytes("png")))
+                ocr_text = pytesseract.image_to_string(img, lang='ori+eng')
+                clean_text = re.sub(r'\s+', ' ', ocr_text).strip()
+            except ImportError:
+                return {"status": "success", "text": clean_text, "note": "OCR library missing, digital text only."}
+            except Exception as e:
+                return {"status": "success", "text": clean_text, "note": f"OCR failed: {str(e)}"}
 
-                # Attempt Tesseract OCR
-                ocr_raw = pytesseract.image_to_string(img, lang='ori+eng')
-                clean_text = re.sub(r'\s+', ' ', ocr_raw).strip()
+        return {"status": "success", "text": clean_text}
 
-            except Exception as ocr_err:
-                # 🛑 RETURN THE EXACT ERROR TO YOUR APP INSTEAD OF HIDING IT
-                error_msg = str(ocr_err)
-                print(f"❌ OCR Failure Details: {error_msg}")
-                raise HTTPException(
-                    status_code=500, 
-                    detail=f"OCR Error: {error_msg}. (Note: Tesseract binary is missing on Render native Python runtime)."
-                )
-
-        return {
-            "status": "success",
-            "page": payload.page_number,
-            "total_pages": total_pages,
-            "text": clean_text,
-            "extraction_mode": mode
-        }
-
-    except HTTPException as he:
-        raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Extraction error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 # =====================================================================
 # ODIA NLP DICTIONARY LOOKUP ENDPOINT
 # =====================================================================
