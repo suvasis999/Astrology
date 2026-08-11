@@ -363,38 +363,50 @@ def fetch_odia_calendar_month(
 # Use this simplified OCR logic in main.py
 @app.post("/api/extract-pdf-text")
 def extract_pdf_page_text(payload: PdfExtractRequest):
+    # 1. Strict Validation: Backend ONLY works with web URLs
+    if not payload.pdf_url.lower().startswith("http"):
+        raise HTTPException(
+            status_code=400, 
+            detail="Backend only accepts http/https URLs. Received: " + payload.pdf_url
+        )
+
     try:
-        # Use simple requests
-        res = requests.get(payload.pdf_url, timeout=20)
-        
-        # Open PDF with PyMuPDF
-        doc = fitz.open(stream=res.content, filetype="pdf")
+        # Download from web
+        res = requests.get(payload.pdf_url, timeout=30)
+        if res.status_code != 200:
+            raise HTTPException(status_code=400, detail="Cannot download PDF from URL")
+
+        # Open with PyMuPDF
+        doc = fitz.open(stream=io.BytesIO(res.content), filetype="pdf")
         page = doc[payload.page_number - 1]
-        
-        # 1. Try simple text extraction
-        text = page.get_text("text")
-        
-        # 2. If text is empty (Scanned Page), trigger OCR via OCR.space (Easiest & Free)
-        if not text or len(text.strip()) < 5:
+
+        # Try digital text
+        text = page.get_text("text").strip()
+
+        # If scanned (OCR), call OCR.space API
+        if len(text) < 15:
             pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
-            img_byte_arr = io.BytesIO(pix.tobytes("png"))
+            img_bytes = pix.tobytes("png")
             
-            # Send to OCR.space API (No system binaries required!)
             ocr_res = requests.post(
                 "https://api.ocr.space/parse/image",
-                files={"filename.png": ("page.png", img_byte_arr, "image/png")},
-                data={"apikey": "helloworld", "language": "ori", "isOverlayRequired": "false"},
-                timeout=20
+                files={"page.png": ("page.png", img_bytes, "image/png")},
+                data={
+                    "apikey": "K82596486888957", # Use your own key
+                    "language": "ori",
+                    "isOverlayRequired": "false"
+                },
+                timeout=30
             )
-            result = ocr_res.json()
-            if "ParsedResults" in result:
-                text = result["ParsedResults"][0].get("ParsedText", "")
+            json_data = ocr_res.json()
+            if "ParsedResults" in json_data and json_data["ParsedResults"]:
+                text = json_data["ParsedResults"][0].get("ParsedText", "")
             else:
                 text = "ସ୍କାନ୍ ହୋଇଥିବା ପୃଷ୍ଠାରୁ ଲେଖା ମିଳିଲା ନାହିଁ ।"
 
-        return {"status": "success", "text": text.strip()}
+        return {"status": "success", "text": text}
     except Exception as e:
-        return {"status": "error", "text": f"Error: {str(e)}"}
+        raise HTTPException(status_code=500, detail=str(e))
 # =====================================================================
 # ODIA NLP DICTIONARY LOOKUP ENDPOINT
 # =====================================================================
