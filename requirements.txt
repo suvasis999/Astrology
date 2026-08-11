@@ -1,7 +1,7 @@
 fastapi
 uvicorn
 pydantic
-pyswisseph
 xhtml2pdf
 gTTS
 requests
+pyswisseph
