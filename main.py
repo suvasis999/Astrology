@@ -3,6 +3,7 @@ import io
 import re
 import requests
 import traceback
+import unicodedata
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -39,7 +40,7 @@ except Exception as e:
 # HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE / SERIALIZATION ERRORS)
 # =====================================================================
 def sanitize_response(data):
-    """Recursively converts bytes to base64 strings to ensure UTF-8 JSON compliance."""
+    """Recursively converts raw bytes to base64 strings for UTF-8 JSON compliance."""
     if isinstance(data, dict):
         return {k: sanitize_response(v) for k, v in data.items()}
     elif isinstance(data, list):
@@ -47,6 +48,46 @@ def sanitize_response(data):
     elif isinstance(data, bytes):
         return base64.b64encode(data).decode('utf-8')
     return data
+
+
+# =====================================================================
+# UNICODE & LEGACY-FONT GARBLE DETECTOR
+# =====================================================================
+def needs_ocr_fallback(text: str) -> bool:
+    """
+    Detects if extracted PDF text is missing, too short, or garbled legacy font text 
+    (e.g., Akruti/ShreeLipi font outputting ASCII gibberish instead of Odia Unicode).
+    """
+    if not text:
+        return True
+    
+    clean = unicodedata.normalize('NFC', text).strip()
+    if len(clean) < 15:
+        return True
+
+    # Count actual Odia Unicode characters (U+0B00 to U+0B7F)
+    odia_char_count = sum(1 for ch in clean if 0x0B00 <= ord(ch) <= 0x0B7F)
+    total_alpha = sum(1 for ch in clean if ch.isalpha())
+
+    # If text has almost no real Odia Unicode, but contains many ASCII characters or legacy font symbols,
+    # it's garbled legacy font text. Force OCR!
+    if odia_char_count < 5 and total_alpha > 10:
+        return True
+
+    # Check for excessive unprintable or replacement symbols
+    weird_symbols = sum(1 for ch in clean if ch in '^~_`{}|\\<>#$@\uFFFD')
+    if weird_symbols > 5:
+        return True
+
+    return False
+
+
+def clean_unicode_text(text: str) -> str:
+    """Removes unprintable control codes and normalizes Unicode."""
+    if not text:
+        return ""
+    text = unicodedata.normalize('NFC', text)
+    return "".join(ch for ch in text if ch in ('\n', '\r', '\t', ' ') or unicodedata.category(ch)[0] != 'C')
 
 
 # =====================================================================
@@ -406,7 +447,7 @@ def fetch_odia_calendar_month(
 
 
 # =====================================================================
-# PDF TEXT EXTRACTION ENDPOINT
+# HIGH-PRECISION PDF TEXT EXTRACTION ENDPOINT
 # =====================================================================
 @app.post("/api/extract-pdf-text")
 async def extract_pdf_page_text(
@@ -414,6 +455,13 @@ async def extract_pdf_page_text(
     page_number: int = Form(1),
     pdf: Optional[UploadFile] = File(None)
 ):
+    """
+    1. Downloads or reads the PDF file.
+    2. Extracts native digital text using PyMuPDF.
+    3. Evaluates quality: If text is garbled (legacy non-Unicode font) or missing,
+       falls back to 300 DPI High-Res OCR using OCR.space Engine 2.
+    4. Normalizes and cleans Unicode before sending to the app.
+    """
     try:
         pdf_bytes = None
 
@@ -435,28 +483,45 @@ async def extract_pdf_page_text(
             raise HTTPException(status_code=400, detail="Page number out of range.")
 
         page = doc[page_number - 1]
-        text = page.get_text("text").strip()
+        raw_text = page.get_text("text").strip()
 
-        if len(text) < 15:
-            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+        # Check if direct text extraction is garbled or missing
+        if needs_ocr_fallback(raw_text):
+            print(f"⚠️ Direct text garbled/missing for page {page_number}. Triggering 300 DPI OCR...")
+            
+            # Render page image at 3.0x scale (300 DPI) for clear matra & conjunct recognition
+            pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
+            
             ocr_res = requests.post(
                 "https://api.ocr.space/parse/image",
                 files={"page.png": ("page.png", pix.tobytes("png"), "image/png")},
-                data={"apikey": "K82596486888957", "language": "ori", "isOverlayRequired": "false"},
-                timeout=30
+                data={
+                    "apikey": "K82596486888957",
+                    "language": "ori",
+                    "isOverlayRequired": "false",
+                    "OCREngine": "2",      # Engine 2 handles complex Indic scripts better
+                    "scale": "true"
+                },
+                timeout=45
             )
             json_data = ocr_res.json()
             if "ParsedResults" in json_data and json_data["ParsedResults"]:
-                text = json_data["ParsedResults"][0].get("ParsedText", "")
+                raw_text = json_data["ParsedResults"][0].get("ParsedText", "")
 
-        return sanitize_response({"status": "success", "text": text})
+        cleaned_text = clean_unicode_text(raw_text)
+
+        if not cleaned_text:
+            cleaned_text = "ଏହି ପୃଷ୍ଠାରେ କୌଣସି ପଢ଼ିବା ଯୋଗ୍ୟ ଲେଖା ମିଳିଲା ନାହିଁ ।"
+
+        return sanitize_response({"status": "success", "text": cleaned_text})
 
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(sanitize_response(str(e))))
 
 
 # =====================================================================
-# 🌟 MULTI-ENGINE ODIA/ENGLISH WORD DETAILS & SYNONYMS ENDPOINT
+# MULTI-ENGINE ODIA/ENGLISH WORD DETAILS & SYNONYMS ENDPOINT
 # =====================================================================
 @app.get("/api/word-details")
 def get_word_details(word: str):
@@ -466,7 +531,6 @@ def get_word_details(word: str):
     2. Google Translate GTX API (Full translation + parts of speech & synonyms)
     3. FreeDictionary API (English definitions & synonyms)
     4. Wiktionary fallback
-    Guarantees rich meanings and synonyms for any Odia or English word.
     """
     try:
         clean_word = word.strip().strip(".,!?:;\"'()[]{}«»<>")
@@ -488,7 +552,6 @@ def get_word_details(word: str):
                     local_meaning = ", ".join(v) if isinstance(v, list) else str(v)
                     break
             
-            # Suffix stripping if still not found
             if not local_meaning:
                 suffixes = ["ମାନଙ୍କର", "ମାନଙ୍କୁ", "ମାନଙ୍କ", "ଠାରୁ", "ମାନେ", "ଙ୍କର", "ଙ୍କୁ", "କୁ", "ରେ", "ର", "ଟି", "ଟା", "ଏ", "ଙ୍କ"]
                 for suffix in sorted(suffixes, key=len, reverse=True):
@@ -502,10 +565,9 @@ def get_word_details(word: str):
         if local_meaning:
             meaning_parts.append(f"📖 ଡିକ୍ସନାରୀ ଅର୍ଥ: {local_meaning}")
 
-        # Detect language (English vs Odia)
         is_english = all(ord(c) < 128 for c in clean_word if c.isalpha())
 
-        # 2. Google Translate GTX API (Translation + Synonyms Breakdown)
+        # 2. Google Translate GTX API
         target_lang = "or" if is_english else "en"
         gtx_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={target_lang}&dt=t&dt=bd&q={requests.utils.quote(clean_word)}"
         
@@ -514,7 +576,6 @@ def get_word_details(word: str):
             if res_gtx.status_code == 200:
                 data_gtx = res_gtx.json()
                 
-                # Extract primary translation
                 primary_trans = ""
                 if data_gtx and len(data_gtx) > 0 and data_gtx[0]:
                     for item in data_gtx[0]:
@@ -525,7 +586,6 @@ def get_word_details(word: str):
                     label = "🌐 ଓଡ଼ିଆ ଅନୁବାଦ" if is_english else "🌐 English Translation"
                     meaning_parts.append(f"{label}: {primary_trans.strip()}")
 
-                # Extract dictionary / synonyms breakdown
                 if len(data_gtx) > 1 and data_gtx[1]:
                     for pos_group in data_gtx[1]:
                         if len(pos_group) >= 2:
@@ -563,7 +623,7 @@ def get_word_details(word: str):
             except Exception as e_dict:
                 print(f"⚠️ FreeDictionary Error: {e_dict}")
 
-        # 4. Wiktionary Fallback for Odia Words
+        # 4. Wiktionary Fallback
         if not is_english and not local_meaning:
             try:
                 wik_url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={requests.utils.quote(clean_word)}&format=json"
@@ -576,9 +636,7 @@ def get_word_details(word: str):
             except Exception as e_wik:
                 print(f"⚠️ Wiktionary Error: {e_wik}")
 
-        # Construct combined response
         full_result = []
-
         if meaning_parts:
             full_result.extend(meaning_parts)
 
