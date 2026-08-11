@@ -4,6 +4,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
+from gtts import gTTS
+import requests
 
 from engine import calculate_astrology, get_daily_rashifal
 from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
@@ -334,3 +336,65 @@ def fetch_odia_calendar_month(
         return {"status": "success", "data": data}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# =====================================================================
+# 1. FREE ODIA NLP / WORD DETAILS LOOKUP ENDPOINT
+# =====================================================================
+@app.get("/api/word-details")
+def get_word_details(word: str):
+  """Looks up Odia word meanings via Odia Wiktionary / Free API."""
+  try:
+    clean_word = word.strip()
+
+    # Query Odia Wiktionary API
+    url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={clean_word}&format=json"
+    headers = {"User-Agent": "OdiaPdfReaderApp/1.0"}
+
+    response = requests.get(url, headers=headers, timeout=5)
+    data = response.json()
+
+    pages = data.get("query", {}).get("pages", {})
+    meaning = None
+
+    for page_id, page_data in pages.items():
+      if page_id != "-1" and "extract" in page_data:
+        meaning = page_data["extract"]
+        break
+
+    if not meaning:
+      meaning = f"'{clean_word}' ଶବ୍ଦର ବିଶେଷ ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।"
+
+    return {"status": "success", "word": clean_word, "meaning": meaning}
+  except Exception as e:
+    return {
+        "status": "error",
+        "word": word,
+        "meaning": f"Error looking up word: {str(e)}",
+    }
+
+
+# =====================================================================
+# 2. FREE ODIA TEXT-TO-SPEECH (TTS) ENDPOINT
+# =====================================================================
+@app.post("/api/tts")
+def generate_odia_speech(payload: dict):
+  """Converts Odia sentence to Base64 MP3 Audio using free gTTS."""
+  try:
+    text = payload.get("text", "")
+    lang = payload.get("lang", "or")  # 'or' is Odia language code
+
+    if not text.strip():
+      raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+    # Generate MP3 stream using gTTS (100% Free)
+    tts = gTTS(text=text, lang=lang, slow=False)
+    audio_buffer = io.BytesIO()
+    tts.write_to_fp(audio_buffer)
+
+    # Encode MP3 bytes to Base64
+    audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode("utf-8")
+
+    return {"status": "success", "audio_base64": audio_base64}
+  except Exception as e:
+    raise HTTPException(status_code=400, detail=str(e))
