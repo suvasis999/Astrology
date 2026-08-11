@@ -8,6 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
+# OCR and Image Processing Imports
+from pdf2image import convert_from_bytes
+import pytesseract
+
 # Safe gTTS import
 try:
     from gTTS import gTTS
@@ -16,6 +20,79 @@ except ImportError:
     gTTS = None
     GTTS_AVAILABLE = False
 
+app = FastAPI(title="Vedic Astro & Odia OCR Engine")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class PdfExtractRequest(BaseModel):
+    pdf_url: str
+    page_number: int = 1
+
+
+# =====================================================================
+# PDF TEXT EXTRACTION WITH AUTOMATIC OCR FALLBACK
+# =====================================================================
+@app.post("/api/extract-pdf-text")
+def extract_pdf_page_text(payload: PdfExtractRequest):
+    try:
+        res = requests.get(payload.pdf_url, timeout=20)
+        if res.status_code != 200:
+            raise HTTPException(status_code=400, detail="PDF download failed")
+
+        pdf_bytes = res.content
+        pdf_file = io.BytesIO(pdf_bytes)
+        reader = PdfReader(pdf_file)
+
+        total_pages = len(reader.pages)
+        page_idx = payload.page_number - 1
+
+        if page_idx < 0 or page_idx >= total_pages:
+            raise HTTPException(status_code=400, detail="Invalid page number")
+
+        # 1. Attempt digital text extraction
+        digital_text = reader.pages[page_idx].extract_text() or ""
+        clean_text = re.sub(r'\s+', ' ', digital_text).strip()
+
+        mode = "digital"
+
+        # 2. Fallback to Tesseract OCR if no digital text is found (< 15 chars)
+        if len(clean_text) < 15:
+            mode = "ocr"
+            try:
+                # Convert specific PDF page to PIL Image (200 DPI for clarity & speed)
+                images = convert_from_bytes(
+                    pdf_bytes,
+                    first_page=payload.page_number,
+                    last_page=payload.page_number,
+                    dpi=200
+                )
+
+                if images:
+                    # Perform OCR using Odia ('ori') and English ('eng') languages
+                    ocr_raw = pytesseract.image_to_string(images[0], lang='ori+eng')
+                    clean_text = re.sub(r'\s+', ' ', ocr_raw).strip()
+
+            except Exception as ocr_err:
+                print(f"⚠️ OCR Failed: {str(ocr_err)}")
+                clean_text = ""
+
+        return {
+            "status": "success",
+            "page": payload.page_number,
+            "total_pages": total_pages,
+            "text": clean_text,
+            "extraction_mode": mode
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Extraction error: {str(e)}")
+    
 # =====================================================================
 # ODIA NLP DICTIONARY ENGINE
 # =====================================================================

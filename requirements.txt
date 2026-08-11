@@ -1,7 +1,9 @@
 fastapi
 uvicorn
 pydantic
-xhtml2pdf
-gTTS
 requests
-pyswisseph
+gTTS
+pypdf
+pytesseract
+pdf2image
+Pillow
