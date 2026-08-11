@@ -15,16 +15,7 @@ from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
 import fitz  # PyMuPDF
 
-# Safe gTTS Import
-try:
-    from gTTS import gTTS
-    GTTS_AVAILABLE = True
-except ImportError:
-    gTTS = None
-    GTTS_AVAILABLE = False
-    print("⚠️ gTTS package not found. Text-to-speech endpoint will return fallback error.")
-
-# Import local engines (engine.py & odia_calendar.py)
+# Safe local engine imports (engine.py & odia_calendar.py)
 try:
     from engine import calculate_astrology, get_daily_rashifal
     from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
@@ -37,7 +28,7 @@ except Exception as e:
 
 
 # =====================================================================
-# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE / SERIALIZATION ERRORS)
+# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE SERIALIZATION ERRORS)
 # =====================================================================
 def sanitize_response(data):
     """Recursively converts raw bytes to base64 strings for UTF-8 JSON compliance."""
@@ -51,12 +42,12 @@ def sanitize_response(data):
 
 
 # =====================================================================
-# UNICODE & LEGACY-FONT GARBLE DETECTOR
+# UNICODE & LEGACY FONT GARBLE DETECTOR
 # =====================================================================
 def needs_ocr_fallback(text: str) -> bool:
     """
-    Detects if extracted PDF text is missing, too short, or garbled legacy font text 
-    (e.g., Akruti/ShreeLipi font outputting ASCII gibberish instead of Odia Unicode).
+    Detects if direct PyMuPDF text extraction produced ASCII gibberish,
+    missing text, or legacy non-Unicode font output (e.g. Akruti/ShreeLipi).
     """
     if not text:
         return True
@@ -69,12 +60,11 @@ def needs_ocr_fallback(text: str) -> bool:
     odia_char_count = sum(1 for ch in clean if 0x0B00 <= ord(ch) <= 0x0B7F)
     total_alpha = sum(1 for ch in clean if ch.isalpha())
 
-    # If text has almost no real Odia Unicode, but contains many ASCII characters or legacy font symbols,
-    # it's garbled legacy font text. Force OCR!
+    # If text has almost no real Odia Unicode but contains many ASCII letters, it's garbled!
     if odia_char_count < 5 and total_alpha > 10:
         return True
 
-    # Check for excessive unprintable or replacement symbols
+    # Check for excessive replacement or unprintable symbols
     weird_symbols = sum(1 for ch in clean if ch in '^~_`{}|\\<>#$@\uFFFD')
     if weird_symbols > 5:
         return True
@@ -91,7 +81,7 @@ def clean_unicode_text(text: str) -> str:
 
 
 # =====================================================================
-# ODIA NLP DICTIONARY ENGINE
+# ODIA NLP DICTIONARY DATASET LOAD
 # =====================================================================
 ODIA_DICT = {}
 
@@ -122,7 +112,6 @@ def load_odianlp_dictionary():
                 print(f"✅ Loaded {len(ODIA_DICT)} entries into OdiaNLP dictionary.")
                 return
         except Exception as e:
-            print(f"⚠️ Failed source {url}: {e}")
             continue
             
     print("⚠️ OdiaNLP dictionary fallback mode active.")
@@ -141,13 +130,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Vedic Astro Engine & Kohinoor Odia Calendar API", 
+    title="Vedic Astro Engine & Kohinoor Odia Reader Server", 
     lifespan=lifespan
 )
 
-# =====================================================================
-# CORS MIDDLEWARE SETUP
-# =====================================================================
+# CORS Setup
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -157,12 +144,9 @@ app.add_middleware(
 )
 
 
-# =====================================================================
-# CUSTOM EXCEPTION HANDLER
-# =====================================================================
+# Exception handler for validation errors
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request, exc):
-    """Safely handles request validation errors without crashing server."""
     def clean_errors(errors):
         if isinstance(errors, list):
             return [clean_errors(e) for e in errors]
@@ -173,10 +157,7 @@ async def validation_exception_handler(request, exc):
         return errors
 
     safe_errors = clean_errors(exc.errors())
-    return JSONResponse(
-        status_code=422,
-        content={"detail": safe_errors},
-    )
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
 
 
 # =====================================================================
@@ -193,11 +174,6 @@ class BirthDataRequest(BaseModel):
     lang: str = Field("en", example="or")
 
 
-class PdfExtractRequest(BaseModel):
-    pdf_url: str
-    page_number: int = 1
-
-
 # =====================================================================
 # HEALTH CHECK ENDPOINT
 # =====================================================================
@@ -212,22 +188,17 @@ def health_check():
     return {
         "status": "ok",
         "astro_engine_loaded": ASTRO_ENGINE_LOADED,
-        "gtts_installed": GTTS_AVAILABLE,
         "fitz_installed": fitz_ok,
         "dictionary_entries": len(ODIA_DICT),
-        "message": "Vedic Astro Engine & Kohinoor Calendar Server Running"
+        "message": "Vedic Astro Engine & Odia Reader Active"
     }
 
 
 # =====================================================================
-# ASTROLOGY KUNDLI CALCULATION ENDPOINT (SWISSEPH / JATAKA)
+# ASTROLOGY KUNDLI CALCULATION ENDPOINT
 # =====================================================================
 @app.post("/api/calculate")
 def calculate_kundli(data: BirthDataRequest):
-    """
-    Calculates D1/D9 Kundli charts, Vimshottari Dasha, Panchanga, 
-    and Rashi details using Swiss Ephemeris in engine.py.
-    """
     try:
         if not ASTRO_ENGINE_LOADED:
             raise Exception("Astrology calculation engine is not loaded on server.")
@@ -254,7 +225,7 @@ def calculate_kundli(data: BirthDataRequest):
 
 
 # =====================================================================
-# HTML TEMPLATE BUILDER FOR PDF EXPORT
+# HTML TEMPLATE BUILDER & PDF EXPORT ENDPOINT
 # =====================================================================
 def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
     planet_rows = ""
@@ -285,7 +256,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
     panchanga = result.get("panchanga", {})
 
-    html = f"""
+    return f"""
     <!DOCTYPE html>
     <html>
     <head>
@@ -375,12 +346,8 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
     </body>
     </html>
     """
-    return html
 
 
-# =====================================================================
-# SERVER-SIDE PDF EXPORT ENDPOINT
-# =====================================================================
 @app.post("/api/export-pdf")
 def export_kundli_pdf(data: BirthDataRequest):
     try:
@@ -447,7 +414,7 @@ def fetch_odia_calendar_month(
 
 
 # =====================================================================
-# HIGH-PRECISION PDF TEXT EXTRACTION ENDPOINT
+# HIGH-PRECISION PDF TEXT EXTRACTION (JPEG OCR UNDER 1MB LIMIT)
 # =====================================================================
 @app.post("/api/extract-pdf-text")
 async def extract_pdf_page_text(
@@ -455,13 +422,6 @@ async def extract_pdf_page_text(
     page_number: int = Form(1),
     pdf: Optional[UploadFile] = File(None)
 ):
-    """
-    1. Downloads or reads the PDF file.
-    2. Extracts native digital text using PyMuPDF.
-    3. Evaluates quality: If text is garbled (legacy non-Unicode font) or missing,
-       falls back to 300 DPI High-Res OCR using OCR.space Engine 2.
-    4. Normalizes and cleans Unicode before sending to the app.
-    """
     try:
         pdf_bytes = None
 
@@ -485,24 +445,25 @@ async def extract_pdf_page_text(
         page = doc[page_number - 1]
         raw_text = page.get_text("text").strip()
 
-        # Check if direct text extraction is garbled or missing
+        # If direct text is missing, short, or garbled legacy font, run OCR.space Engine 2
         if needs_ocr_fallback(raw_text):
-            print(f"⚠️ Direct text garbled/missing for page {page_number}. Triggering 300 DPI OCR...")
+            print(f"⚠️ Direct text garbled/missing for page {page_number}. Running Compressed JPEG OCR...")
             
-            # Render page image at 3.0x scale (300 DPI) for clear matra & conjunct recognition
-            pix = page.get_pixmap(matrix=fitz.Matrix(3.0, 3.0))
-            
+            # Render page image as JPEG at 2.0x scale (compressed to ~200 KB to fit under OCR.space 1 MB limit)
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+            jpeg_bytes = pix.tobytes("jpg", jpg_quality=75)
+
             ocr_res = requests.post(
                 "https://api.ocr.space/parse/image",
-                files={"page.png": ("page.png", pix.tobytes("png"), "image/png")},
+                files={"page.jpg": ("page.jpg", jpeg_bytes, "image/jpeg")},
                 data={
                     "apikey": "K82596486888957",
                     "language": "ori",
                     "isOverlayRequired": "false",
-                    "OCREngine": "2",      # Engine 2 handles complex Indic scripts better
+                    "OCREngine": "2",
                     "scale": "true"
                 },
-                timeout=45
+                timeout=35
             )
             json_data = ocr_res.json()
             if "ParsedResults" in json_data and json_data["ParsedResults"]:
@@ -521,17 +482,78 @@ async def extract_pdf_page_text(
 
 
 # =====================================================================
+# DIRECT GOOGLE WEB TRANSLATE TTS ENGINE (CHUNKED & UNBLOCKED)
+# =====================================================================
+def get_odia_tts_mp3_bytes(text: str) -> bytes:
+    """
+    Fetches Odia audio bytes directly from Google's web TTS stream.
+    Splits text into chunks to avoid sentence length restrictions.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    # Break text into ~150-character chunks by punctuation
+    sentences = re.split(r'([।,!?\n]+)', text)
+    chunks = []
+    current_chunk = ""
+
+    for s in sentences:
+        if len(current_chunk) + len(s) < 150:
+            current_chunk += s
+        else:
+            if current_chunk.strip():
+                chunks.append(current_chunk.strip())
+            current_chunk = s
+
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+
+    if not chunks:
+        chunks = [text[:150]]
+
+    combined_mp3_bytes = bytearray()
+
+    for chunk in chunks[:8]:  # Limit to 8 chunks (~1200 chars max per request)
+        encoded_chunk = requests.utils.quote(chunk)
+        tts_url = f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_chunk}&tl=or&client=tw-ob"
+        
+        res = requests.get(tts_url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            combined_mp3_bytes.extend(res.content)
+
+    return bytes(combined_mp3_bytes)
+
+
+@app.post("/api/tts")
+def generate_odia_speech(payload: dict):
+    try:
+        raw_text = payload.get("text", "")
+        if not raw_text or not raw_text.strip():
+            raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+        clean_text = clean_unicode_text(raw_text).strip()
+        if not clean_text:
+            clean_text = raw_text[:300]
+
+        mp3_bytes = get_odia_tts_mp3_bytes(clean_text)
+
+        if not mp3_bytes:
+            raise HTTPException(status_code=500, detail="Could not generate Odia audio.")
+
+        audio_base64 = base64.b64encode(mp3_bytes).decode("utf-8")
+        return sanitize_response({"status": "success", "audio_base64": audio_base64})
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"TTS Error: {str(e)}")
+
+
+# =====================================================================
 # MULTI-ENGINE ODIA/ENGLISH WORD DETAILS & SYNONYMS ENDPOINT
 # =====================================================================
 @app.get("/api/word-details")
 def get_word_details(word: str):
-    """
-    Comprehensive multi-source word details & synonym engine:
-    1. Local OdiaNLP dictionary lookup (with suffix stripping)
-    2. Google Translate GTX API (Full translation + parts of speech & synonyms)
-    3. FreeDictionary API (English definitions & synonyms)
-    4. Wiktionary fallback
-    """
     try:
         clean_word = word.strip().strip(".,!?:;\"'()[]{}«»<>")
         if not clean_word:
@@ -540,7 +562,7 @@ def get_word_details(word: str):
         meaning_parts = []
         synonyms_list = []
 
-        # 1. Local OdiaNLP Dictionary Lookup
+        # 1. Local OdiaNLP Dictionary Lookup with stem/suffix stripping
         local_meaning = None
         if clean_word in ODIA_DICT:
             val = ODIA_DICT[clean_word]
@@ -567,7 +589,7 @@ def get_word_details(word: str):
 
         is_english = all(ord(c) < 128 for c in clean_word if c.isalpha())
 
-        # 2. Google Translate GTX API
+        # 2. Google Translate GTX API (Full translation + parts of speech & synonyms)
         target_lang = "or" if is_english else "en"
         gtx_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={target_lang}&dt=t&dt=bd&q={requests.utils.quote(clean_word)}"
         
@@ -623,7 +645,7 @@ def get_word_details(word: str):
             except Exception as e_dict:
                 print(f"⚠️ FreeDictionary Error: {e_dict}")
 
-        # 4. Wiktionary Fallback
+        # 4. Wiktionary Fallback for Odia Words
         if not is_english and not local_meaning:
             try:
                 wik_url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={requests.utils.quote(clean_word)}&format=json"
@@ -666,41 +688,3 @@ def get_word_details(word: str):
             "meaning": f"ଅର୍ଥ: {word}",
             "source": "Error Safety"
         }
-
-
-# =====================================================================
-# ODIA TEXT-TO-SPEECH (TTS) ENDPOINT
-# =====================================================================
-@app.post("/api/tts")
-def generate_odia_speech(payload: dict):
-    if not GTTS_AVAILABLE or gTTS is None:
-        raise HTTPException(
-            status_code=500,
-            detail="gTTS package is not installed on the server."
-        )
-
-    try:
-        raw_text = payload.get("text", "")
-        lang = payload.get("lang", "or")
-
-        if not raw_text or not raw_text.strip():
-            raise HTTPException(status_code=400, detail="Text cannot be empty")
-
-        clean_text = re.sub(r'[^\w\s\u0B00-\u0B7F.,!?-]', '', raw_text)
-        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-
-        if not clean_text:
-            clean_text = raw_text[:300]
-
-        if len(clean_text) > 500:
-            clean_text = clean_text[:500] + "..."
-
-        tts = gTTS(text=clean_text, lang=lang, slow=False)
-        audio_buffer = io.BytesIO()
-        tts.write_to_fp(audio_buffer)
-
-        audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode("utf-8")
-        return sanitize_response({"status": "success", "audio_base64": audio_base64})
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"TTS Engine Error: {str(e)}")
