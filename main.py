@@ -373,33 +373,58 @@ def sanitize_response(data):
     return data
 
 
+from fastapi import File, UploadFile, Form, Optional
+
 @app.post("/api/extract-pdf-text")
-def extract_pdf_page_text(payload: PdfExtractRequest):
-    if not payload.pdf_url.lower().startswith("http"):
-        raise HTTPException(
-            status_code=400, 
-            detail="Backend only accepts http/https URLs. Received: " + payload.pdf_url
-        )
-
+async def extract_pdf_page_text(
+    pdf_url: Optional[str] = Form(None),
+    page_number: int = Form(1),
+    pdf: Optional[UploadFile] = File(None)
+):
+    """
+    Handles both:
+    1. Remote URL via JSON/Form (e.g. https://odiabook.com/...)
+    2. Local File binary upload via Multipart FormData (file:// or content://)
+    """
     try:
-        # Download from web
-        res = requests.get(payload.pdf_url, timeout=30)
-        if res.status_code != 200:
-            raise HTTPException(status_code=400, detail="Cannot download PDF from URL")
+        pdf_bytes = None
 
-        # Open with PyMuPDF
-        doc = fitz.open(stream=io.BytesIO(res.content), filetype="pdf")
+        # Case A: Local file uploaded as multipart/form-data
+        if pdf is not None:
+            pdf_bytes = await pdf.read()
         
-        if payload.page_number - 1 >= len(doc):
-            raise HTTPException(status_code=400, detail="Page number out of range")
-            
-        page = doc[payload.page_number - 1]
+        # Case B: Remote URL passed
+        elif pdf_url:
+            if not pdf_url.lower().startswith("http"):
+                raise HTTPException(status_code=400, detail="Invalid URL format.")
+            res = requests.get(pdf_url, timeout=30)
+            if res.status_code != 200:
+                raise HTTPException(status_code=400, detail="Cannot download PDF from URL.")
+            pdf_bytes = res.content
+        else:
+            raise HTTPException(status_code=400, detail="No PDF source provided.")
 
-        # Extract digital text directly (Lightning fast!)
+        # Open PDF with PyMuPDF
+        doc = fitz.open(stream=io.BytesIO(pdf_bytes), filetype="pdf")
+        
+        if page_number - 1 < 0 or page_number - 1 >= len(doc):
+            raise HTTPException(status_code=400, detail="Page number out of range.")
+
+        page = doc[page_number - 1]
         text = page.get_text("text").strip()
 
-        if not text:
-            text = "ଏହି ପୃଷ୍ଠାରେ କୌଣସି ଲେଖା ମିଳିଲା ନାହିଁ ।"
+        # Fallback to OCR.space if page has no digital text
+        if len(text) < 15:
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+            ocr_res = requests.post(
+                "https://api.ocr.space/parse/image",
+                files={"page.png": ("page.png", pix.tobytes("png"), "image/png")},
+                data={"apikey": "K82596486888957", "language": "ori", "isOverlayRequired": "false"},
+                timeout=30
+            )
+            json_data = ocr_res.json()
+            if "ParsedResults" in json_data and json_data["ParsedResults"]:
+                text = json_data["ParsedResults"][0].get("ParsedText", "")
 
         return sanitize_response({"status": "success", "text": text})
 
