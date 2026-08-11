@@ -2,28 +2,23 @@ import base64
 import io
 import re
 import requests
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
-from gTTS import gTTS
+
+# Safe gTTS import to prevent server boot failure
+try:
+    from gTTS import gTTS
+    GTTS_AVAILABLE = True
+except ImportError:
+    gTTS = None
+    GTTS_AVAILABLE = False
+    print("⚠️ gTTS package not found. Text-to-speech feature will return fallback error.")
 
 from engine import calculate_astrology, get_daily_rashifal
 from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
-
-app = FastAPI(title="Vedic Astro Engine & Odia NLP API")
-
-# =====================================================================
-# CORS MIDDLEWARE SETUP
-# =====================================================================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 # =====================================================================
 # ODIA NLP DICTIONARY ENGINE (Loaded from OdiaNLP/dictionary GitHub)
@@ -56,12 +51,38 @@ def load_odianlp_dictionary():
                                 ODIA_DICT[w.strip()] = m
                 print(f"✅ Loaded {len(ODIA_DICT)} entries from OdiaNLP dictionary.")
                 return
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Failed source {url}: {e}")
             continue
             
-    print("⚠️ OdiaNLP online dictionary fallback enabled.")
+    print("⚠️ OdiaNLP dictionary offline fallback enabled.")
 
-load_odianlp_dictionary()
+
+# =====================================================================
+# FASTAPI LIFESPAN MANAGEMENT
+# =====================================================================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Load dictionary safely
+    try:
+        load_odianlp_dictionary()
+    except Exception as e:
+        print(f"⚠️ Dictionary startup warning: {e}")
+    yield
+
+
+app = FastAPI(title="Vedic Astro Engine & Odia NLP API", lifespan=lifespan)
+
+# =====================================================================
+# CORS MIDDLEWARE SETUP
+# =====================================================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # =====================================================================
@@ -83,7 +104,12 @@ class BirthDataRequest(BaseModel):
 # =====================================================================
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "Vedic Astro Engine Server Running"}
+    return {
+        "status": "ok",
+        "message": "Vedic Astro Engine Server Running",
+        "gtts_enabled": GTTS_AVAILABLE,
+        "dictionary_entries": len(ODIA_DICT),
+    }
 
 
 # =====================================================================
@@ -309,9 +335,7 @@ def fetch_odia_calendar_month(
 # =====================================================================
 @app.get("/api/word-details")
 def get_word_details(word: str):
-    """
-    Looks up Odia word meanings in OdiaNLP dictionary with Wiktionary fallback.
-    """
+    """Looks up Odia word meanings in OdiaNLP dictionary with Wiktionary fallback."""
     try:
         clean_word = word.strip()
         if not clean_word:
@@ -376,6 +400,12 @@ def get_word_details(word: str):
 @app.post("/api/tts")
 def generate_odia_speech(payload: dict):
     """Converts Odia text to Base64 MP3 Audio safely."""
+    if not GTTS_AVAILABLE or gTTS is None:
+        raise HTTPException(
+            status_code=500,
+            detail="gTTS package is not installed on the server. Ensure gTTS is listed in requirements.txt on Render."
+        )
+
     try:
         raw_text = payload.get("text", "")
         lang = payload.get("lang", "or")
@@ -383,7 +413,7 @@ def generate_odia_speech(payload: dict):
         if not raw_text or not raw_text.strip():
             raise HTTPException(status_code=400, detail="Text cannot be empty")
 
-        # Clean spaces, newlines, and control characters
+        # Clean extra spaces, newlines, and control characters
         clean_text = re.sub(r'\s+', ' ', raw_text).strip()
 
         # Limit to 800 characters max per chunk to prevent gTTS timeout/crash
