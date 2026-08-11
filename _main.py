@@ -28,18 +28,16 @@ try:
     from engine import calculate_astrology, get_daily_rashifal
     from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
     ASTRO_ENGINE_LOADED = True
-    print("✅ Astrology & Odia Calendar Engines loaded successfully!")
-except Exception as e:
+except ImportError as e:
     ASTRO_ENGINE_LOADED = False
-    print(f"❌ Engine Load Error: {e}")
-    traceback.print_exc()
+    print(f"⚠️ Engine import warning: {e}")
 
 
 # =====================================================================
-# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE / SERIALIZATION ERRORS)
+# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE ERRORS)
 # =====================================================================
 def sanitize_response(data):
-    """Recursively converts bytes to base64 strings to ensure UTF-8 JSON compliance."""
+    """Recursively converts raw bytes to base64 strings for UTF-8 JSON compliance."""
     if isinstance(data, dict):
         return {k: sanitize_response(v) for k, v in data.items()}
     elif isinstance(data, list):
@@ -179,7 +177,7 @@ def health_check():
 
 
 # =====================================================================
-# ASTROLOGY KUNDLI CALCULATION ENDPOINT (SWISSEPH / JATAKA)
+# ASTROLOGY KUNDLI CALCULATION ENDPOINT
 # =====================================================================
 @app.post("/api/calculate")
 def calculate_kundli(data: BirthDataRequest):
@@ -456,158 +454,80 @@ async def extract_pdf_page_text(
 
 
 # =====================================================================
-# 🌟 MULTI-ENGINE ODIA/ENGLISH WORD DETAILS & SYNONYMS ENDPOINT
+# ADVANCED ODIA NLP & TRANSLATION DICTIONARY ENDPOINT
 # =====================================================================
 @app.get("/api/word-details")
 def get_word_details(word: str):
-    """
-    Comprehensive multi-source word details & synonym engine:
-    1. Local OdiaNLP dictionary lookup (with suffix stripping)
-    2. Google Translate GTX API (Full translation + parts of speech & synonyms)
-    3. FreeDictionary API (English definitions & synonyms)
-    4. Wiktionary fallback
-    Guarantees rich meanings and synonyms for any Odia or English word.
-    """
     try:
-        clean_word = word.strip().strip(".,!?:;\"'()[]{}«»<>")
+        clean_word = word.strip().strip(".,!?:;\"'()[]{}«»")
         if not clean_word:
             return {"status": "error", "meaning": "ଶବ୍ଦ ଚୟନ କରନ୍ତୁ ।"}
 
-        meaning_parts = []
-        synonyms_list = []
-
-        # 1. Local OdiaNLP Dictionary Lookup
-        local_meaning = None
+        # 1. Exact Match
         if clean_word in ODIA_DICT:
             val = ODIA_DICT[clean_word]
-            local_meaning = ", ".join(val) if isinstance(val, list) else str(val)
-        else:
-            lower_w = clean_word.lower()
-            for k, v in ODIA_DICT.items():
-                if k.lower() == lower_w:
-                    local_meaning = ", ".join(v) if isinstance(v, list) else str(v)
+            meaning_str = ", ".join(val) if isinstance(val, list) else str(val)
+            return {"status": "success", "word": clean_word, "meaning": meaning_str, "source": "OdiaNLP Exact"}
+
+        # 2. Case-insensitive key match
+        lower_word = clean_word.lower()
+        for k, v in ODIA_DICT.items():
+            if k.lower() == lower_word:
+                meaning_str = ", ".join(v) if isinstance(v, list) else str(v)
+                return {"status": "success", "word": k, "meaning": meaning_str, "source": "OdiaNLP Key"}
+
+        # 3. Reverse English-to-Odia Search (e.g., "major")
+        english_matches = []
+        for odia_k, eng_v in ODIA_DICT.items():
+            eng_str = ", ".join(eng_v) if isinstance(eng_v, list) else str(eng_v)
+            if lower_word in eng_str.lower().split():
+                english_matches.append(f"• {odia_k}: {eng_str}")
+                if len(english_matches) >= 4:
                     break
-            
-            # Suffix stripping if still not found
-            if not local_meaning:
-                suffixes = ["ମାନଙ୍କର", "ମାନଙ୍କୁ", "ମାନଙ୍କ", "ଠାରୁ", "ମାନେ", "ଙ୍କର", "ଙ୍କୁ", "କୁ", "ରେ", "ର", "ଟି", "ଟା", "ଏ", "ଙ୍କ"]
-                for suffix in sorted(suffixes, key=len, reverse=True):
-                    if clean_word.endswith(suffix) and len(clean_word) > len(suffix):
-                        stem = clean_word[:-len(suffix)]
-                        if stem in ODIA_DICT:
-                            val = ODIA_DICT[stem]
-                            local_meaning = (", ".join(val) if isinstance(val, list) else str(val)) + f" (ମୂଳ: {stem})"
-                            break
+        if english_matches:
+            return {"status": "success", "word": clean_word, "meaning": "ଓଡ଼ିଆ ଅର୍ଥ (Matches):\n" + "\n".join(english_matches), "source": "OdiaNLP English Search"}
 
-        if local_meaning:
-            meaning_parts.append(f"📖 ଡିକ୍ସନାରୀ ଅର୍ଥ: {local_meaning}")
+        # 4. Grammatical Suffix Stripping
+        suffixes = ["ମାନଙ୍କର", "ମାନଙ୍କୁ", "ମାନଙ୍କ", "ଠାରୁ", "ମାନେ", "ଙ୍କର", "ଙ୍କୁ", "କୁ", "ରେ", "ର", "ଟି", "ଟା", "ଏ", "ଙ୍କ"]
+        for suffix in sorted(suffixes, key=len, reverse=True):
+            if clean_word.endswith(suffix) and len(clean_word) > len(suffix):
+                stem = clean_word[:-len(suffix)]
+                if stem in ODIA_DICT:
+                    val = ODIA_DICT[stem]
+                    meaning_str = ", ".join(val) if isinstance(val, list) else str(val)
+                    return {"status": "success", "word": clean_word, "meaning": f"{meaning_str} (ମୂଳ ଶବ୍ଦ: {stem})", "source": "OdiaNLP Stemmed"}
 
-        # Detect language (English vs Odia)
+        # 5. Dynamic Translation API Fallback (MyMemory)
         is_english = all(ord(c) < 128 for c in clean_word if c.isalpha())
-
-        # 2. Google Translate GTX API (Translation + Synonyms Breakdown)
-        target_lang = "or" if is_english else "en"
-        gtx_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={target_lang}&dt=t&dt=bd&q={requests.utils.quote(clean_word)}"
+        langpair = "en|or" if is_english else "or|en"
         
         try:
-            res_gtx = requests.get(gtx_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
-            if res_gtx.status_code == 200:
-                data_gtx = res_gtx.json()
-                
-                # Extract primary translation
-                primary_trans = ""
-                if data_gtx and len(data_gtx) > 0 and data_gtx[0]:
-                    for item in data_gtx[0]:
-                        if item and len(item) > 0 and item[0]:
-                            primary_trans += item[0]
-                
-                if primary_trans and primary_trans.strip().lower() != clean_word.lower():
-                    label = "🌐 ଓଡ଼ିଆ ଅନୁବାଦ" if is_english else "🌐 English Translation"
-                    meaning_parts.append(f"{label}: {primary_trans.strip()}")
+            api_url = f"https://api.my-memory.translated.net/get?q={requests.utils.quote(clean_word)}&langpair={langpair}"
+            res = requests.get(api_url, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                translated = data.get("responseData", {}).get("translatedText", "")
+                if translated and "MYMEMORY WARNING" not in translated and translated.lower() != clean_word.lower():
+                    label = "ଓଡ଼ିଆ ଅନୁବାଦ:" if is_english else "English Meaning:"
+                    return {"status": "success", "word": clean_word, "meaning": f"{label}\n{translated}", "source": "Translation Engine"}
+        except Exception as e:
+            print(f"⚠️ Translation API error: {e}")
 
-                # Extract dictionary / synonyms breakdown
-                if len(data_gtx) > 1 and data_gtx[1]:
-                    for pos_group in data_gtx[1]:
-                        if len(pos_group) >= 2:
-                            pos = pos_group[0]
-                            terms = pos_group[1]
-                            if terms:
-                                terms_str = ", ".join(terms[:6])
-                                synonyms_list.append(f"• ({pos}): {terms_str}")
+        # 6. Wiktionary Fallback
+        try:
+            url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={requests.utils.quote(clean_word)}&format=json"
+            res_wik = requests.get(url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
+            pages = res_wik.json().get("query", {}).get("pages", {})
+            for p_id, p_data in pages.items():
+                if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
+                    return {"status": "success", "word": clean_word, "meaning": p_data["extract"].strip(), "source": "Wiktionary"}
+        except Exception as e:
+            print(f"⚠️ Wiktionary error: {e}")
 
-        except Exception as e_gtx:
-            print(f"⚠️ GTX Error: {e_gtx}")
-
-        # 3. FreeDictionary API for English Words
-        if is_english:
-            try:
-                dict_url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{requests.utils.quote(clean_word.lower())}"
-                res_dict = requests.get(dict_url, timeout=5)
-                if res_dict.status_code == 200:
-                    data_dict = res_dict.json()
-                    if isinstance(data_dict, list) and len(data_dict) > 0:
-                        entry = data_dict[0]
-                        meanings = entry.get("meanings", [])
-                        for m in meanings:
-                            part_of_speech = m.get("partOfSpeech", "")
-                            defs = m.get("definitions", [])
-                            syns = m.get("synonyms", [])
-                            
-                            if defs and len(defs) > 0:
-                                def_text = defs[0].get("definition", "")
-                                if def_text:
-                                    meaning_parts.append(f"💡 Def ({part_of_speech}): {def_text}")
-                            
-                            if syns:
-                                synonyms_list.append(f"• Synonyms ({part_of_speech}): {', '.join(syns[:5])}")
-            except Exception as e_dict:
-                print(f"⚠️ FreeDictionary Error: {e_dict}")
-
-        # 4. Wiktionary Fallback for Odia Words
-        if not is_english and not local_meaning:
-            try:
-                wik_url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={requests.utils.quote(clean_word)}&format=json"
-                res_wik = requests.get(wik_url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
-                if res_wik.status_code == 200:
-                    pages = res_wik.json().get("query", {}).get("pages", {})
-                    for p_id, p_data in pages.items():
-                        if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
-                            meaning_parts.append(f"📚 Wiktionary: {p_data['extract'].strip()}")
-            except Exception as e_wik:
-                print(f"⚠️ Wiktionary Error: {e_wik}")
-
-        # Construct combined response
-        full_result = []
-
-        if meaning_parts:
-            full_result.extend(meaning_parts)
-
-        if synonyms_list:
-            full_result.append("\n🔄 ସମାର୍ଥକ ଶବ୍ଦ / Synonyms & Alternate Meanings:")
-            full_result.extend(synonyms_list)
-
-        if full_result:
-            return {
-                "status": "success",
-                "word": clean_word,
-                "meaning": "\n\n".join(full_result),
-                "source": "Multi-Engine NLP"
-            }
-
-        return {
-            "status": "success",
-            "word": clean_word,
-            "meaning": f"'{clean_word}' - {clean_word}",
-            "source": "Literal Fallback"
-        }
+        return {"status": "success", "word": clean_word, "meaning": f"'{clean_word}' ଶବ୍ଦର ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।", "source": "None"}
 
     except Exception as e:
-        return {
-            "status": "error",
-            "word": word,
-            "meaning": f"ଅର୍ଥ: {word}",
-            "source": "Error Safety"
-        }
+        return {"status": "error", "word": word, "meaning": f"ଅର୍ଥ ଆଣିବାରେ ତ୍ରୁଟି: {str(e)}", "source": "Error"}
 
 
 # =====================================================================
