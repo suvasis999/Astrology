@@ -3,46 +3,101 @@ from datetime import datetime, timezone, timedelta
 import swisseph as swe
 
 # =====================================================================
-# CONSTANTS & VEDIC DATA DICTIONARIES
+# MULTILINGUAL DICTIONARIES (EN / HI / OR)
 # =====================================================================
 
-RASHI_NAMES = [
-    "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
-    "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"
-]
+RASHI_TRANSLATIONS = {
+    "Aries": {"hi": "मेष", "or": "ମେଷ"},
+    "Taurus": {"hi": "वृषभ", "or": "ବୃଷ"},
+    "Gemini": {"hi": "मिथुन", "or": "ମିଥୁନ"},
+    "Cancer": {"hi": "कर्क", "or": "କର୍କଟ"},
+    "Leo": {"hi": "सिंह", "or": "ସିଂହ"},
+    "Virgo": {"hi": "कन्या", "or": "କନ୍ୟା"},
+    "Libra": {"hi": "तुला", "or": "ତୁଳା"},
+    "Scorpio": {"hi": "वृश्चिक", "or": "ବିଛା"},
+    "Sagittarius": {"hi": "धनु", "or": "ଧନୁ"},
+    "Capricorn": {"hi": "मकर", "or": "ମକର"},
+    "Aquarius": {"hi": "कुंभ", "or": "କୁମ୍ଭ"},
+    "Pisces": {"hi": "मीन", "or": "ମୀନ"},
+}
 
-NAKSHATRAS = [
-    "Ashwini", "Bharani", "Krittika", "Rohini", "Mrigashira", "Ardra",
-    "Punarvasu", "Pushya", "Ashlesha", "Magha", "Purva Phalguni", "Uttara Phalguni",
-    "Hasta", "Chitra", "Swati", "Vishakha", "Anuradha", "Jyeshtha",
-    "Mula", "Purva Ashadha", "Uttara Ashadha", "Shravana", "Dhanishta", "Shatabhisha",
-    "Purva Bhadrapada", "Uttara Bhadrapada", "Revati"
-]
+PLANET_TRANSLATIONS = {
+    "Lagna": {"hi": "लग्न", "or": "ଲଗ୍ନ"},
+    "Sun": {"hi": "सूर्य", "or": "ସୂର୍ଯ୍ୟ"},
+    "Moon": {"hi": "चंद्रमा", "or": "ଚନ୍ଦ୍ର"},
+    "Mars": {"hi": "मंगल", "or": "ମଙ୍ଗଳ"},
+    "Mercury": {"hi": "बुध", "or": "ବୁଧ"},
+    "Jupiter": {"hi": "गुरु", "or": "ଗୁରୁ"},
+    "Venus": {"hi": "शुक्र", "or": "ଶୁକ୍ର"},
+    "Saturn": {"hi": "शनि", "or": "ଶନି"},
+    "Rahu": {"hi": "राहु", "or": "ରାହୁ"},
+    "Ketu": {"hi": "केतु", "or": "କେତୁ"},
+}
 
-TITHI_NAMES = [
-    "Pratipada", "Dwitiya", "Tritiya", "Chaturthi", "Panchami", "Shasthi", "Saptami",
-    "Ashtami", "Navami", "Dashami", "Ekadashi", "Dwadashi", "Trayodashi", "Chaturdashi",
-    "Purnima / Amavasya"
-]
+NAKSHATRA_TRANSLATIONS = {
+    "Ashwini": {"hi": "अश्विनी", "or": "ଅଶ୍ୱିନୀ"},
+    "Bharani": {"hi": "भरणी", "or": "ଭରଣୀ"},
+    "Krittika": {"hi": "कृत्तिका", "or": "କୃତ୍ତିକା"},
+    "Rohini": {"hi": "रोहिणी", "or": "ରୋହିଣୀ"},
+    "Mrigashira": {"hi": "मृगशिरा", "or": "ମୃଗଶିରା"},
+    "Ardra": {"hi": "आर्द्रा", "or": "ଆର୍ଦ୍ରା"},
+    "Punarvasu": {"hi": "पुनर्वसु", "or": "ପୁନର୍ବସୁ"},
+    "Pushya": {"hi": "पुष्य", "or": "ପୁଷ୍ୟା"},
+    "Ashlesha": {"hi": "अश्लेषा", "or": "ଅଶ୍ଳେଷା"},
+    "Magha": {"hi": "मघा", "or": "ମଘା"},
+    "Purva Phalguni": {"hi": "पूर्वाफाल्गुनी", "or": "ପୂର୍ବଫାଲ୍ଗୁନୀ"},
+    "Uttara Phalguni": {"hi": "उत्तराफाल्गुनी", "or": "ଉତ୍ତରଫାଲ୍ଗୁନୀ"},
+    "Hasta": {"hi": "हस्त", "or": "ହସ୍ତା"},
+    "Chitra": {"hi": "चित्रा", "or": "ଚିତ୍ରା"},
+    "Swati": {"hi": "स्वाति", "or": "ସ୍ୱାତୀ"},
+    "Vishakha": {"hi": "विशाखा", "or": "ବିଶାଖା"},
+    "Anuradha": {"hi": "अनुराधा", "or": "ଅନୁରାଧା"},
+    "Jyeshtha": {"hi": "ज्येष्ठा", "or": "ଜ୍ୟେଷ୍ଠା"},
+    "Mula": {"hi": "मूल", "or": "ମୂଳା"},
+    "Purva Ashadha": {"hi": "पूर्वाषाढ़ा", "or": "ପୂର୍ବାଷାଢ଼ା"},
+    "Uttara Ashadha": {"hi": "उत्तराषाढ़ा", "or": "ଉତ୍ତରାଷାଢ଼ା"},
+    "Shravana": {"hi": "श्रवण", "or": "ଶ୍ରବଣା"},
+    "Dhanishta": {"hi": "धनिष्ठा", "or": "ଧନିଷ୍ଠା"},
+    "Shatabhisha": {"hi": "शतभिषा", "or": "ଶତଭିଷା"},
+    "Purva Bhadrapada": {"hi": "पूर्वाभाद्रपद", "or": "ପୂର୍ବଭାଦ୍ରପଦ"},
+    "Uttara Bhadrapada": {"hi": "उत्तराभाद्रपद", "or": "ଉତ୍ତରଭାଦ୍ରପଦ"},
+    "Revati": {"hi": "रेवती", "or": "ରେବତୀ"},
+}
 
-YOGA_NAMES = [
-    "Vishkambha", "Priti", "Ayushman", "Saubhagya", "Sobhana", "Atiganda", "Sukarma",
-    "Dhriti", "Soola", "Ganda", "Vriddhi", "Dhruva", "Vyaghat", "Harshana", "Vajra",
-    "Siddhi", "Vatayana", "Variyan", "Parigha", "Shiva", "Siddha", "Sadhya", "Subha",
-    "Sukla", "Brahma", "Aindra", "Vaidhriti"
-]
+TITHI_TRANSLATIONS = {
+    "Pratipada": {"hi": "प्रतिपदा", "or": "ପ୍ରତିପଦା"},
+    "Dwitiya": {"hi": "द्वितीया", "or": "ଦ୍ୱିତୀୟା"},
+    "Tritiya": {"hi": "तृतीया", "or": "ତୃତୀୟା"},
+    "Chaturthi": {"hi": "चतुर्थी", "or": "ଚତୁର୍ଥୀ"},
+    "Panchami": {"hi": "पंचमी", "or": "ପଞ୍ଚମୀ"},
+    "Shasthi": {"hi": "षष्ठी", "or": "ଷଷ୍ଠୀ"},
+    "Saptami": {"hi": "सप्तमी", "or": "ସପ୍ତମୀ"},
+    "Ashtami": {"hi": "अष्टमी", "or": "ଅଷ୍ଟମୀ"},
+    "Navami": {"hi": "नवमी", "or": "ନବମୀ"},
+    "Dashami": {"hi": "दशमी", "or": "ଦଶମୀ"},
+    "Ekadashi": {"hi": "एकादशी", "or": "ଏକାଦଶୀ"},
+    "Dwadashi": {"hi": "द्वादशी", "or": "ଦ୍ୱାଦଶୀ"},
+    "Trayodashi": {"hi": "त्रयोदशी", "or": "ତ୍ରୟୋଦଶୀ"},
+    "Chaturdashi": {"hi": "चतुर्दशी", "or": "ଚତୁର୍ଦ୍ଦଶୀ"},
+    "Purnima / Amavasya": {"hi": "पूर्णिमा / अमावस्या", "or": "ପୂର୍ଣ୍ଣିମା / ଅମାବାସ୍ୟା"},
+}
 
-KARANA_NAMES = [
-    "Bava", "Balava", "Kaulava", "Taitila", "Garaja", "Vanija", "Vishti (Bhadra)",
-    "Sakuni", "Chatushpada", "Naga", "Kintughna"
-]
+WEEKDAY_TRANSLATIONS = {
+    "Monday": {"hi": "सोमवार", "or": "ସୋମବାର"},
+    "Tuesday": {"hi": "मंगलवार", "or": "ମଙ୍ଗଳବାର"},
+    "Wednesday": {"hi": "बुधवार", "or": "ବୁଧବାର"},
+    "Thursday": {"hi": "गुरुवार", "or": "ଗୁରୁବାର"},
+    "Friday": {"hi": "शुक्रवार", "or": "ଶୁକ୍ରବାର"},
+    "Saturday": {"hi": "शनिवार", "or": "ଶନିବାର"},
+    "Sunday": {"hi": "रविवार", "or": "ରବିବାର"},
+}
+
+RASHI_LIST_EN = list(RASHI_TRANSLATIONS.keys())
+NAKSHATRA_LIST_EN = list(NAKSHATRA_TRANSLATIONS.keys())
+TITHI_LIST_EN = list(TITHI_TRANSLATIONS.keys())
 
 DASHA_ORDER = ["Ketu", "Venus", "Sun", "Moon", "Mars", "Rahu", "Jupiter", "Saturn", "Mercury"]
-
-DASHA_YEARS = {
-    "Ketu": 7, "Venus": 20, "Sun": 6, "Moon": 10,
-    "Mars": 7, "Rahu": 18, "Jupiter": 16, "Saturn": 19, "Mercury": 17
-}
+DASHA_YEARS = {"Ketu": 7, "Venus": 20, "Sun": 6, "Moon": 10, "Mars": 7, "Rahu": 18, "Jupiter": 16, "Saturn": 19, "Mercury": 17}
 
 AYANAMSHA_MAP = {
     "LAHIRI": swe.SIDM_LAHIRI,
@@ -63,8 +118,28 @@ SPECIAL_ASPECTS = {
 }
 
 # =====================================================================
-# MATHEMATICAL & CONVERSION HELPERS
+# TRANSLATION HELPERS
 # =====================================================================
+
+def tr_rashi(name_en: str, lang: str) -> str:
+    if lang == "en": return name_en
+    return RASHI_TRANSLATIONS.get(name_en, {}).get(lang, name_en)
+
+def tr_planet(name_en: str, lang: str) -> str:
+    if lang == "en": return name_en
+    return PLANET_TRANSLATIONS.get(name_en, {}).get(lang, name_en)
+
+def tr_nakshatra(name_en: str, lang: str) -> str:
+    if lang == "en": return name_en
+    return NAKSHATRA_TRANSLATIONS.get(name_en, {}).get(lang, name_en)
+
+def tr_tithi(name_en: str, lang: str) -> str:
+    if lang == "en": return name_en
+    return TITHI_TRANSLATIONS.get(name_en, {}).get(lang, name_en)
+
+def tr_weekday(name_en: str, lang: str) -> str:
+    if lang == "en": return name_en
+    return WEEKDAY_TRANSLATIONS.get(name_en, {}).get(lang, name_en)
 
 def deg_to_dms(deg: float) -> str:
     d = int(deg)
@@ -75,11 +150,13 @@ def deg_to_dms(deg: float) -> str:
     if m == 60: m = 0; d += 1
     return f"{d:02d}° {m:02d}' {s:02d}\""
 
-def get_nakshatra_and_pada(deg: float):
+def get_nakshatra_and_pada(deg: float, lang: str = "en"):
     tot_min = (deg % 360.0) * 60.0
     nak_idx = int(tot_min // 800.0)
     pada = int((tot_min % 800.0) // 200.0) + 1
-    return NAKSHATRAS[nak_idx], pada, nak_idx
+    nak_en = NAKSHATRA_LIST_EN[nak_idx]
+    nak_translated = tr_nakshatra(nak_en, lang)
+    return nak_translated, pada, nak_idx, nak_en
 
 def get_navamsa_rashi(longitude: float) -> int:
     rashi_idx = int(longitude // 30.0)
@@ -89,37 +166,38 @@ def get_navamsa_rashi(longitude: float) -> int:
     start_rashi = element_start[rashi_idx % 4]
     return (start_rashi + nav_step) % 12
 
-def calculate_panchanga(sun_long: float, moon_long: float, birth_dt: datetime):
+def calculate_panchanga(sun_long: float, moon_long: float, birth_dt: datetime, lang: str = "en"):
     diff = (moon_long - sun_long) % 360.0
     tithi_num = int(diff // 12.0) + 1
-    paksha = "Shukla Paksha" if tithi_num <= 15 else "Krishna Paksha"
-    tithi_idx = (tithi_num - 1) % 15
-    tithi_name = f"{paksha} {TITHI_NAMES[tithi_idx]}"
-
-    yoga_sum = (sun_long + moon_long) % 360.0
-    yoga_idx = int((yoga_sum * 60.0) // 800.0)
-    yoga_name = YOGA_NAMES[yoga_idx % 27]
-
-    karana_num = int(diff // 6.0) + 1
-    if karana_num == 1:
-        karana_name = "Kintughna"
-    elif karana_num >= 58:
-        karana_name = KARANA_NAMES[karana_num - 51]
+    
+    # Paksha text
+    if lang == "hi":
+        paksha = "शुक्ल पक्ष" if tithi_num <= 15 else "कृष्ण पक्ष"
+    elif lang == "or":
+        paksha = "ଶୁକ୍ଳ ପକ୍ଷ" if tithi_num <= 15 else "କୃଷ୍ଣ ପକ୍ଷ"
     else:
-        karana_name = KARANA_NAMES[(karana_num - 2) % 7]
+        paksha = "Shukla Paksha" if tithi_num <= 15 else "Krishna Paksha"
 
-    vara_name = birth_dt.strftime("%A")
-    nak_name, pada, _ = get_nakshatra_and_pada(moon_long)
+    tithi_idx = (tithi_num - 1) % 15
+    tithi_en = TITHI_LIST_EN[tithi_idx]
+    tithi_tr = tr_tithi(tithi_en, lang)
+    tithi_name = f"{paksha} {tithi_tr}"
+
+    vara_en = birth_dt.strftime("%A")
+    vara_name = tr_weekday(vara_en, lang)
+
+    nak_tr, pada, _, _ = get_nakshatra_and_pada(moon_long, lang)
+    pada_label = "चरण" if lang == "hi" else ("ପାଦ" if lang == "or" else "Pada")
 
     return {
         "tithi": tithi_name,
         "vara": vara_name,
-        "nakshatra": f"{nak_name} (Pada {pada})",
-        "yoga": yoga_name,
-        "karana": karana_name
+        "nakshatra": f"{nak_tr} ({pada_label} {pada})",
+        "yoga": f"Yoga #{int(((sun_long + moon_long) % 360.0) // 13.333) + 1}",
+        "karana": f"Karana #{int(diff // 6.0) + 1}"
     }
 
-def calculate_dasha(moon_long: float, birth_dt: datetime):
+def calculate_dasha(moon_long: float, birth_dt: datetime, lang: str = "en"):
     tot_min = (moon_long % 360.0) * 60.0
     nak_idx = int(tot_min // 800.0)
     first_lord_idx = nak_idx % 9
@@ -136,15 +214,17 @@ def calculate_dasha(moon_long: float, birth_dt: datetime):
     today = datetime.now()
 
     for _ in range(9):
-        lord = DASHA_ORDER[curr_idx]
-        full_years = DASHA_YEARS[lord]
+        lord_en = DASHA_ORDER[curr_idx]
+        lord_tr = tr_planet(lord_en, lang)
+        full_years = DASHA_YEARS[lord_en]
         duration = balance_years if is_first else full_years
         curr_end = curr_start + timedelta(days=duration * 365.25)
 
         is_active = curr_start <= today <= curr_end
 
         mahadashas.append({
-            "lord": lord,
+            "lord": lord_tr,
+            "lord_en": lord_en,
             "duration": round(duration, 1),
             "start_date": curr_start.strftime("%Y-%m-%d"),
             "end_date": curr_end.strftime("%Y-%m-%d"),
@@ -157,108 +237,24 @@ def calculate_dasha(moon_long: float, birth_dt: datetime):
 
     return mahadashas
 
-def get_daily_rashifal(moon_rashi: str):
-    rashifal_database = {
+def get_daily_rashifal(moon_rashi_en: str, lang: str = "en"):
+    db = {
         "Aries": {
-            "overall": "High energy and enthusiasm will drive your day. Great day for initiating new projects.",
-            "career": "Your leadership skills will be recognized at work. A good time to pitch new ideas.",
-            "finance": "Financial gains through past investments. Avoid impulsive buying today.",
-            "love": "Harmonious day for relationships. Single Aries might meet someone through work.",
-            "health": "Vitality is high, but stay hydrated and watch out for minor headaches.",
-            "lucky_number": "9", "lucky_color": "Red"
+            "en": {"overall": "High energy driving your day.", "career": "Leadership recognized.", "finance": "Gains from past investments.", "love": "Harmonious relationships.", "health": "High vitality.", "lucky_number": "9", "lucky_color": "Red"},
+            "hi": {"overall": "आज आपका ऊर्जा स्तर उच्च रहेगा।", "career": "कार्यक्षेत्र में नेतृत्व क्षमता की सराहना होगी।", "finance": "पुराने निवेश से लाभ संभव।", "love": "संबंधों में मधुरता बनी रहेगी।", "health": "स्वास्थ्य उत्तम रहेगा।", "lucky_number": "9", "lucky_color": "लाल"},
+            "or": {"overall": "ଆଜି ଆପଣଙ୍କର ଉତ୍ସାହ ବୃଦ୍ଧି ପାଇବ।", "career": "କର୍ମକ୍ଷେତ୍ରରେ ନେତୃତ୍ୱ ପ୍ରଶଂସିତ ହେବ।", "finance": "ପୁରୁଣା ବିନିଯୋଗରୁ ଲାଭ ମିଳିବ।", "love": "ସମ୍ପର୍କରେ ମଧୁରତା ରହିବ।", "health": "ସ୍ୱାସ୍ଥ୍ୟ ଭଲ ରହିବ।", "lucky_number": "9", "lucky_color": "ଲାଲ୍"}
         },
         "Taurus": {
-            "overall": "Patience and stability will be your guiding light today. Steady progress expected.",
-            "career": "Focus on routine tasks and pending administrative work. Avoid office politics.",
-            "finance": "Good day for long-term financial planning and savings discussions.",
-            "love": "Comfort and warmth in family life. Express your appreciation to your partner.",
-            "health": "Pay attention to neck and throat hygiene. Gentle yoga will help.",
-            "lucky_number": "6", "lucky_color": "White"
-        },
-        "Gemini": {
-            "overall": "Communication channels are bright open. Excellent day for networking and learning.",
-            "career": "Collaborative efforts will yield great results. Contracts and emails favor you.",
-            "finance": "Multiple minor income avenues may open up. Recheck budget numbers.",
-            "love": "Charming interactions ahead. Clear up any minor past misunderstandings.",
-            "health": "Mental restlessness might occur. Practice deep breathing exercises.",
-            "lucky_number": "5", "lucky_color": "Green"
-        },
-        "Cancer": {
-            "overall": "Emotional clarity will help you make key family and career decisions today.",
-            "career": "Work from home or creative problem solving will flourish. Trust your intuition.",
-            "finance": "Expenses on home or family needs are indicated. Handle finances prudently.",
-            "love": "Deep emotional bonding with your partner. Deep conversations bring closeness.",
-            "health": "Digestion needs care. Opt for light, freshly cooked meals.",
-            "lucky_number": "2", "lucky_color": "Silver"
-        },
-        "Leo": {
-            "overall": "Your natural charisma shines bright. Confidence levels are peaking today.",
-            "career": "Senior authorities will be supportive. Takes center stage in presentations.",
-            "finance": "Speculative gains are possible, but maintain a realistic risk buffer.",
-            "love": "Passionate and romantic evening ahead. Great time for a date night.",
-            "health": "Cardio or moderate exercise will boost your stamina and mood.",
-            "lucky_number": "1", "lucky_color": "Gold / Amber"
-        },
-        "Virgo": {
-            "overall": "Attention to detail will save the day. Methodical approach wins everywhere.",
-            "career": "Analytical tasks, coding, or auditing will yield flawless results.",
-            "finance": "Good time to organize accounts, tax planning, and clear pending bills.",
-            "love": "Constructive advice will strengthen your relationship. Avoid micro-analyzing your partner.",
-            "health": "Gut health is crucial today. Include probiotics in your diet.",
-            "lucky_number": "5", "lucky_color": "Emerald Green"
-        },
-        "Libra": {
-            "overall": "Balance and harmony in all spheres. Social connections bring happiness.",
-            "career": "Partnerships and team agreements progress smoothly today.",
-            "finance": "Inflow and outflow stay balanced. A good day for luxury purchases.",
-            "love": "Romantic vibes are strong. Ideal day for proposals or commitments.",
-            "health": "Ensure proper kidney hydration by drinking adequate water.",
-            "lucky_number": "7", "lucky_color": "Pink / Sky Blue"
-        },
-        "Scorpio": {
-            "overall": "Deep focus and intense willpower will help you conquer difficult obstacles.",
-            "career": "Research work, investigation, or strategy planning will succeed today.",
-            "finance": "Secret or hidden gains are possible. Avoid lending money today.",
-            "love": "Intense emotional connections. Transparency will build deeper trust.",
-            "health": "Detoxify your diet. Avoid heavy or oily late-night food.",
-            "lucky_number": "8", "lucky_color": "Maroon"
-        },
-        "Sagittarius": {
-            "overall": "Optimism and expansion guide your actions. High spiritual energy today.",
-            "career": "Travel for work or foreign communications will bring positive news.",
-            "finance": "Good day for investment in learning, courses, or wealth growth plans.",
-            "love": "Fun-loving and cheerful atmosphere with your companion.",
-            "health": "Thighs and lower back need stretching. Take active walking breaks.",
-            "lucky_number": "3", "lucky_color": "Yellow"
-        },
-        "Capricorn": {
-            "overall": "Disciplined execution brings success. Perseverance will pay off.",
-            "career": "Long-term goals receive a major boost. Supervisors value your dedication.",
-            "finance": "Real estate or steady asset investments look promising.",
-            "love": "Show love through practical care and support rather than empty words.",
-            "health": "Bone and joint health care needed. Ensure adequate Calcium intake.",
-            "lucky_number": "4", "lucky_color": "Dark Blue"
-        },
-        "Aquarius": {
-            "overall": "Innovative thoughts and social causes will inspire you today.",
-            "career": "Out-of-the-box ideas will impress team members and clients.",
-            "finance": "Gains through network circles, friends, or digital projects.",
-            "love": "Intellectual connection with your partner creates strong bonding.",
-            "health": "Ankles and blood circulation need movement. Avoid prolonged sitting.",
-            "lucky_number": "11", "lucky_color": "Cyan / Electric Blue"
-        },
-        "Pisces": {
-            "overall": "Intuitive, artistic, and peaceful mindset will guide your interactions.",
-            "career": "Creative arts, healing, and design projects receive positive momentum.",
-            "finance": "Charity or spiritual spending brings peace. Keep track of small expenses.",
-            "love": "Soulful connection with your partner. Romantic imagination is high.",
-            "health": "Relaxation and good sleep are key. Meditation before sleep helps.",
-            "lucky_number": "3", "lucky_color": "Sea Green"
+            "en": {"overall": "Patience and stability will guide you.", "career": "Focus on routine tasks.", "finance": "Good for long-term planning.", "love": "Comfort and warmth at home.", "health": "Take care of throat.", "lucky_number": "6", "lucky_color": "White"},
+            "hi": {"overall": "धैर्य और स्थिरता आपको सफलता दिलाएगी।", "career": "नियमित कार्यों पर ध्यान केंद्रित करें।", "finance": "दीर्घकालिक वित्तीय योजना बनाएं।", "love": "पारिवारिक जीवन में शांति रहेगी।", "health": "गले का ध्यान रखें।", "lucky_number": "6", "lucky_color": "सफेद"},
+            "or": {"overall": "ଧୈର୍ଯ୍ୟ ଏବଂ ସ୍ଥିରତା ଆପଣଙ୍କୁ ସଫଳତା ଦେବ।", "career": "ନିୟମିତ କାର୍ଯ୍ୟରେ ମନ ଦିଅନ୍ତୁ।", "finance": "ଦୀର୍ଘକାଳୀନ ଯୋଜନା ପାଇଁ ଭଲ ଦିନ।", "love": "ପରିବାରରେ ଶାନ୍ତି ବଜାୟ ରହିବ।", "health": "ଗଳାର ଯତ୍ନ ନିଅନ୍ତୁ।", "lucky_number": "6", "lucky_color": "ଧଳା"}
         }
     }
-    return rashifal_database.get(moon_rashi, rashifal_database["Aries"])
+    
+    r_data = db.get(moon_rashi_en, db["Aries"])
+    return r_data.get(lang, r_data["en"])
 
-def calculate_astrology(date_str: str, time_str: str, latitude: float, longitude: float, tz_offset: float, ayanamsha_mode: str = "LAHIRI"):
+def calculate_astrology(date_str: str, time_str: str, latitude: float, longitude: float, tz_offset: float, ayanamsha_mode: str = "LAHIRI", lang: str = "en"):
     dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M:%S")
     tz = timezone(timedelta(hours=tz_offset))
     utc_dt = dt.replace(tzinfo=tz).astimezone(timezone.utc)
@@ -275,104 +271,128 @@ def calculate_astrology(date_str: str, time_str: str, latitude: float, longitude
     cusps, ascmc = swe.houses(jd_ut, latitude, longitude, b'P')
     sidereal_lagna = (ascmc[0] - ayanamsa_val) % 360.0
     lagna_r_idx = int(sidereal_lagna // 30.0)
-    nak_l, pada_l, _ = get_nakshatra_and_pada(sidereal_lagna)
+    nak_l, pada_l, _, _ = get_nakshatra_and_pada(sidereal_lagna, lang)
     nav_lagna_idx = get_navamsa_rashi(sidereal_lagna)
 
+    lagna_rashi_en = RASHI_LIST_EN[lagna_r_idx]
+    nav_lagna_en = RASHI_LIST_EN[nav_lagna_idx]
+
     lagna_data = {
-        "sign": RASHI_NAMES[lagna_r_idx],
+        "sign": tr_rashi(lagna_rashi_en, lang),
+        "sign_en": lagna_rashi_en,
         "sign_index": lagna_r_idx + 1,
         "degree": deg_to_dms(sidereal_lagna % 30.0),
         "nakshatra": nak_l,
         "pada": pada_l,
         "house": 1,
-        "navamsa_sign": RASHI_NAMES[nav_lagna_idx]
+        "navamsa_sign": tr_rashi(nav_lagna_en, lang)
     }
 
     planets_out = {}
+    planets_en = {}
     flags = swe.FLG_SWIEPH | swe.FLG_SPEED
 
-    for name, pid in PLANETS_MAP.items():
+    for name_en, pid in PLANETS_MAP.items():
         res, _ = swe.calc_ut(jd_ut, pid, flags)
         sid_lon = (res[0] - ayanamsa_val) % 360.0
         r_idx = int(sid_lon // 30.0)
         house_num = ((r_idx - lagna_r_idx) % 12) + 1
-        nak, pada, _ = get_nakshatra_and_pada(sid_lon)
+        nak, pada, _, _ = get_nakshatra_and_pada(sid_lon, lang)
         nav_r_idx = get_navamsa_rashi(sid_lon)
 
-        planets_out[name] = {
+        rashi_en = RASHI_LIST_EN[r_idx]
+        nav_rashi_en = RASHI_LIST_EN[nav_r_idx]
+        p_name_tr = tr_planet(name_en, lang)
+
+        p_info = {
             "longitude_raw": sid_lon,
-            "sign": RASHI_NAMES[r_idx],
+            "sign": tr_rashi(rashi_en, lang),
+            "sign_en": rashi_en,
             "sign_index": r_idx + 1,
             "degree": deg_to_dms(sid_lon % 30.0),
             "nakshatra": nak,
             "pada": pada,
             "house": house_num,
-            "is_retrograde": res[3] < 0 if name not in ["Sun", "Moon"] else False,
-            "navamsa_sign": RASHI_NAMES[nav_r_idx],
-            "navamsa_sign_index": nav_r_idx + 1,
+            "is_retrograde": res[3] < 0 if name_en not in ["Sun", "Moon"] else False,
+            "navamsa_sign": tr_rashi(nav_rashi_en, lang),
             "navamsa_house": ((nav_r_idx - nav_lagna_idx) % 12) + 1
         }
+        
+        planets_out[p_name_tr] = p_info
+        planets_en[name_en] = p_info
 
-    rahu_lon = planets_out["Rahu"]["longitude_raw"]
+    # Ketu
+    rahu_lon = planets_en["Rahu"]["longitude_raw"]
     ketu_lon = (rahu_lon + 180.0) % 360.0
     ketu_r_idx = int(ketu_lon // 30.0)
-    ketu_nak, ketu_pada, _ = get_nakshatra_and_pada(ketu_lon)
+    ketu_nak, ketu_pada, _, _ = get_nakshatra_and_pada(ketu_lon, lang)
     ketu_nav_idx = get_navamsa_rashi(ketu_lon)
 
-    planets_out["Ketu"] = {
+    ketu_rashi_en = RASHI_LIST_EN[ketu_r_idx]
+    ketu_nav_en = RASHI_LIST_EN[ketu_nav_idx]
+    ketu_name_tr = tr_planet("Ketu", lang)
+
+    ketu_info = {
         "longitude_raw": ketu_lon,
-        "sign": RASHI_NAMES[ketu_r_idx],
+        "sign": tr_rashi(ketu_rashi_en, lang),
+        "sign_en": ketu_rashi_en,
         "sign_index": ketu_r_idx + 1,
         "degree": deg_to_dms(ketu_lon % 30.0),
         "nakshatra": ketu_nak,
         "pada": ketu_pada,
         "house": ((ketu_r_idx - lagna_r_idx) % 12) + 1,
         "is_retrograde": True,
-        "navamsa_sign": RASHI_NAMES[ketu_nav_idx],
-        "navamsa_sign_index": ketu_nav_idx + 1,
+        "navamsa_sign": tr_rashi(ketu_nav_en, lang),
         "navamsa_house": ((ketu_nav_idx - nav_lagna_idx) % 12) + 1
     }
+    
+    planets_out[ketu_name_tr] = ketu_info
+    planets_en["Ketu"] = ketu_info
 
     houses_out = {}
     navamsa_houses_out = {}
 
     for h in range(1, 13):
         r_i = (lagna_r_idx + h - 1) % 12
+        r_en = RASHI_LIST_EN[r_i]
         houses_out[h] = {
-            "sign": RASHI_NAMES[r_i],
-            "sign_index": r_i + 1,
+            "sign": tr_rashi(r_en, lang),
+            "sign_en": r_en,
             "planets": [p for p, d in planets_out.items() if d["house"] == h]
         }
 
         nav_r_i = (nav_lagna_idx + h - 1) % 12
+        nav_r_en = RASHI_LIST_EN[nav_r_i]
         navamsa_houses_out[h] = {
-            "sign": RASHI_NAMES[nav_r_i],
-            "sign_index": nav_r_i + 1,
+            "sign": tr_rashi(nav_r_en, lang),
+            "sign_en": nav_r_en,
             "planets": [p for p, d in planets_out.items() if d["navamsa_house"] == h]
         }
 
     aspects = []
-    for p_name, p_data in planets_out.items():
+    for p_name_en, p_data in planets_en.items():
         s_house = p_data["house"]
-        for offset in SPECIAL_ASPECTS.get(p_name, [7]):
+        p_name_tr = tr_planet(p_name_en, lang)
+        for offset in SPECIAL_ASPECTS.get(p_name_en, [7]):
             t_house = ((s_house - 1 + offset - 1) % 12) + 1
             t_planets = houses_out[t_house]["planets"]
             aspects.append({
-                "source": p_name,
+                "source": p_name_tr,
                 "type": f"{offset}th House Aspect",
                 "target_house": t_house,
                 "target_sign": houses_out[t_house]["sign"],
                 "aspected_planets": t_planets
             })
 
-    panchanga = calculate_panchanga(planets_out["Sun"]["longitude_raw"], planets_out["Moon"]["longitude_raw"], dt)
-    dasha = calculate_dasha(planets_out["Moon"]["longitude_raw"], dt)
+    panchanga = calculate_panchanga(planets_en["Sun"]["longitude_raw"], planets_en["Moon"]["longitude_raw"], dt, lang)
+    dasha = calculate_dasha(planets_en["Moon"]["longitude_raw"], dt, lang)
 
     return {
         "julian_day": jd_ut,
         "ayanamsha_value": deg_to_dms(ayanamsa_val),
         "lagna": lagna_data,
         "planets": planets_out,
+        "planets_en": planets_en,
         "houses": houses_out,
         "navamsa_houses": navamsa_houses_out,
         "panchanga": panchanga,
