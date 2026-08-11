@@ -437,46 +437,64 @@ async def extract_pdf_page_text(
 # =====================================================================
 @app.get("/api/word-details")
 def get_word_details(word: str):
-    clean_word = word.strip()
-    if not clean_word:
-        return {"status": "success", "word": word, "meaning": "ଶବ୍ଦ ଦିଆଯାଇ ନାହିଁ ।"}
+    """Looks up Odia word meanings in OdiaNLP dictionary with Wiktionary fallback."""
+    try:
+        clean_word = word.strip()
+        if not clean_word:
+            return {"status": "error", "meaning": "ଶବ୍ଦ ଚୟନ କରନ୍ତୁ ।"}
 
-    # 1. Exact match on Odia key
-    if clean_word in ODIA_DICT:
-        return {"status": "success", "word": clean_word, "meaning": ODIA_DICT[clean_word]}
+        # 1. Exact Match in OdiaNLP Dictionary
+        if clean_word in ODIA_DICT:
+            meaning = ODIA_DICT[clean_word]
+            if isinstance(meaning, list):
+                meaning = ", ".join(meaning)
+            return {
+                "status": "success",
+                "word": clean_word,
+                "meaning": meaning,
+                "source": "OdiaNLP"
+            }
 
-    # 2. Case-insensitive match on keys
-    lower_word = clean_word.lower()
-    for k, v in ODIA_DICT.items():
-        if k.lower() == lower_word:
-            return {"status": "success", "word": k, "meaning": v}
+        # 2. Substring Match in OdiaNLP Dictionary
+        for odia_key, val in ODIA_DICT.items():
+            if clean_word in odia_key or odia_key in clean_word:
+                meaning = val if isinstance(val, str) else ", ".join(val)
+                return {
+                    "status": "success",
+                    "word": clean_word,
+                    "meaning": f"{meaning} ({odia_key})",
+                    "source": "OdiaNLP Fuzzy"
+                }
 
-    # 3. Reverse/Value Search (If user types an English word like "major")
-    matches = []
-    for k, v in ODIA_DICT.items():
-        if isinstance(v, str) and lower_word in v.lower():
-            matches.append(f"• **{k}**: {v}")
-            if len(matches) >= 4:  # Limit results for speed
-                break
-    if matches:
+        # 3. Fallback: Query Wiktionary
+        url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={clean_word}&format=json"
+        res = requests.get(url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
+        pages = res.json().get("query", {}).get("pages", {})
+        
+        for p_id, p_data in pages.items():
+            if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
+                return {
+                    "status": "success",
+                    "word": clean_word,
+                    "meaning": p_data["extract"].strip(),
+                    "source": "Wiktionary"
+                }
+
         return {
-            "status": "success", 
-            "word": clean_word, 
-            "meaning": "ସମ୍ଭାବ୍ୟ ଅର୍ଥ (Matches found):\n" + "\n".join(matches)
+            "status": "success",
+            "word": clean_word,
+            "meaning": f"'{clean_word}' ଶବ୍ଦର ବିଶେଷ ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।",
+            "source": "None"
         }
 
-    # 4. Try stripping common Odia suffixes (e.g. ରେ, କୁ, ଟି, ଟା, ମାନେ)
-    suffixes = ["ମାନଙ୍କର", "ମାନଙ୍କୁ", "ମାନଙ୍କ", "ଠାରୁ", "ମାନେ", "ଙ୍କର", "ଙ୍କୁ", "କୁ", "ରେ", "ର", "ଟି", "ଟା", "ଏ", "ଙ୍କ"]
-    for suffix in sorted(suffixes, key=len, reverse=True):
-        if clean_word.endswith(suffix) and len(clean_word) > len(suffix):
-            stem = clean_word[:-len(suffix)]
-            if stem in ODIA_DICT:
-                return {"status": "success", "word": clean_word, "meaning": f"{ODIA_DICT[stem]} (ମୂଳ ଶବ୍ଦ / Root: {stem})"}
-            for k, v in ODIA_DICT.items():
-                if k.lower() == stem.lower():
-                    return {"status": "success", "word": clean_word, "meaning": f"{v} (ମୂଳ ଶବ୍ଦ / Root: {k})"}
+    except Exception as e:
+        return {
+            "status": "error",
+            "word": word,
+            "meaning": f"ଅର୍ଥ ଆଣିବାରେ ତ୍ରୁଟି: {str(e)}",
+            "source": "Error"
+        }
 
-    return {"status": "success", "word": clean_word, "meaning": "ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।"}
 
 # =====================================================================
 # ODIA TEXT-TO-SPEECH (TTS) ENDPOINT
