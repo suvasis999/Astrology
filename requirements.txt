@@ -6,4 +6,5 @@ gTTS
 PyMuPDF
 pytesseract
 Pillow
-google-cloud-vision
+xhtml2pdf
+pyswisseph
