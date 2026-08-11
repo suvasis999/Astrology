@@ -7,4 +7,4 @@ PyMuPDF
 pytesseract
 Pillow
 xhtml2pdf
-pyswisseph
+python-multipart
