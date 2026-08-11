@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
+from pypdf import PdfReader
 
 # Safe gTTS import to prevent server boot failure
 try:
@@ -26,15 +27,11 @@ from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calenda
 ODIA_DICT = {}
 
 def load_odianlp_dictionary():
-    """Downloads & caches OdiaNLP dictionary from GitHub at startup."""
     global ODIA_DICT
     github_urls = [
         "https://raw.githubusercontent.com/OdiaNLP/dictionary/master/OdiaToEnglish.json",
         "https://raw.githubusercontent.com/OdiaNLP/dictionary/main/OdiaToEnglish.json",
-        "https://raw.githubusercontent.com/OdiaNLP/dictionary/master/dictionary.json",
-        "https://raw.githubusercontent.com/OdiaNLP/dictionary/main/dictionary.json",
     ]
-    
     for url in github_urls:
         try:
             res = requests.get(url, timeout=10)
@@ -42,20 +39,134 @@ def load_odianlp_dictionary():
                 data = res.json()
                 if isinstance(data, dict):
                     ODIA_DICT.update(data)
-                elif isinstance(data, list):
-                    for item in data:
-                        if isinstance(item, dict):
-                            w = item.get("word") or item.get("odia")
-                            m = item.get("meaning") or item.get("english")
-                            if w and m:
-                                ODIA_DICT[w.strip()] = m
-                print(f"✅ Loaded {len(ODIA_DICT)} entries from OdiaNLP dictionary.")
                 return
-        except Exception as e:
-            print(f"⚠️ Failed source {url}: {e}")
+        except Exception:
             continue
-            
-    print("⚠️ OdiaNLP dictionary offline fallback enabled.")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        load_odianlp_dictionary()
+    except Exception as e:
+        print(f"Dictionary warning: {e}")
+    yield
+
+app = FastAPI(title="Vedic Astro & Odia NLP Engine", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# =====================================================================
+# PDF TEXT EXTRACTION ENDPOINT (Reads Full PDF Page)
+# =====================================================================
+class PdfExtractRequest(BaseModel):
+    pdf_url: str
+    page_number: int = 1
+
+@app.post("/api/extract-pdf-text")
+def extract_pdf_page_text(payload: PdfExtractRequest):
+    """Downloads PDF from URL and extracts plain text for a specific page."""
+    try:
+        res = requests.get(payload.pdf_url, timeout=15)
+        if res.status_code != 200:
+            raise HTTPException(status_code=400, detail="Unable to download PDF file")
+
+        pdf_file = io.BytesIO(res.content)
+        reader = PdfReader(pdf_file)
+
+        total_pages = len(reader.pages)
+        page_idx = payload.page_number - 1
+
+        if page_idx < 0 or page_idx >= total_pages:
+            raise HTTPException(status_code=400, detail="Invalid page number")
+
+        page_text = reader.pages[page_idx].extract_text() or ""
+        clean_text = re.sub(r'\s+', ' ', page_text).strip()
+
+        return {
+            "status": "success",
+            "page": payload.page_number,
+            "total_pages": total_pages,
+            "text": clean_text
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"PDF text extraction failed: {str(e)}")
+
+
+# =====================================================================
+# SAFE ODIA TTS ENDPOINT
+# =====================================================================
+@app.post("/api/tts")
+def generate_odia_speech(payload: dict):
+    if not GTTS_AVAILABLE or gTTS is None:
+        raise HTTPException(
+            status_code=500,
+            detail="gTTS package is missing on the server. Add gTTS to requirements.txt"
+        )
+
+    try:
+        raw_text = payload.get("text", "")
+        lang = payload.get("lang", "or")
+
+        if not raw_text or not raw_text.strip():
+            raise HTTPException(status_code=400, detail="Text cannot be empty")
+
+        clean_text = re.sub(r'\s+', ' ', raw_text).strip()
+
+        # Limit chunk size to prevent gTTS timeout
+        if len(clean_text) > 800:
+            clean_text = clean_text[:800] + "..."
+
+        tts = gTTS(text=clean_text, lang=lang, slow=False)
+        audio_buffer = io.BytesIO()
+        tts.write_to_fp(audio_buffer)
+
+        audio_base64 = base64.b64encode(audio_buffer.getvalue()).decode("utf-8")
+        return {"status": "success", "audio_base64": audio_base64}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"TTS Generation Error: {str(e)}")
+
+
+# =====================================================================
+# ODIA NLP DICTIONARY LOOKUP
+# =====================================================================
+@app.get("/api/word-details")
+def get_word_details(word: str):
+    try:
+        clean_word = word.strip()
+        if not clean_word:
+            return {"status": "error", "meaning": "ଶବ୍ଦ ଚୟନ କରନ୍ତୁ ।"}
+
+        if clean_word in ODIA_DICT:
+            meaning = ODIA_DICT[clean_word]
+            if isinstance(meaning, list):
+                meaning = ", ".join(meaning)
+            return {"status": "success", "word": clean_word, "meaning": meaning}
+
+        # Substring Search
+        for odia_key, val in ODIA_DICT.items():
+            if clean_word in odia_key or odia_key in clean_word:
+                meaning = val if isinstance(val, str) else ", ".join(val)
+                return {"status": "success", "word": clean_word, "meaning": f"{meaning} ({odia_key})"}
+
+        # Wiktionary Fallback
+        url = f"https://or.wiktionary.org/w/api.php?action=query&prop=extracts&exintro&explaintext&titles={clean_word}&format=json"
+        res = requests.get(url, headers={"User-Agent": "OdiaPdfReaderApp/1.0"}, timeout=5)
+        pages = res.json().get("query", {}).get("pages", {})
+        
+        for p_id, p_data in pages.items():
+            if p_id != "-1" and "extract" in p_data and p_data["extract"].strip():
+                return {"status": "success", "word": clean_word, "meaning": p_data["extract"].strip()}
+
+        return {"status": "success", "word": clean_word, "meaning": f"'{clean_word}' ଶବ୍ଦର ବିଶେଷ ବିବରଣୀ ଉପଲବ୍ଧ ନାହିଁ ।"}
+    except Exception as e:
+        return {"status": "error", "word": word, "meaning": f"ଅର୍ଥ ଆଣିବାରେ ତ୍ରୁଟି: {str(e)}"}
 
 
 # =====================================================================
