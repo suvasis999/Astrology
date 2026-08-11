@@ -11,6 +11,9 @@ import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
 
+from typing import Optional
+from fastapi import File, UploadFile, Form
+
 # Safe gTTS Import
 try:
     from gTTS import gTTS
@@ -373,7 +376,6 @@ def sanitize_response(data):
     return data
 
 
-from fastapi import File, UploadFile, Form, Optional
 
 @app.post("/api/extract-pdf-text")
 async def extract_pdf_page_text(
