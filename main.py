@@ -2,11 +2,14 @@ import base64
 import io
 import re
 import requests
+import traceback
 from typing import Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, File, UploadFile, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
 import fitz  # PyMuPDF
@@ -20,16 +23,19 @@ except ImportError:
     GTTS_AVAILABLE = False
     print("⚠️ gTTS package not found. Text-to-speech endpoint will return fallback error.")
 
-# Import local engines (Ensure engine.py and odia_calendar.py are present in your backend directory)
+# Import local engines (Ensure engine.py and odia_calendar.py are present in your root directory)
+# engine.py uses pyswisseph / Swiss Ephemeris & Jataka calculations internally
 try:
     from engine import calculate_astrology, get_daily_rashifal
     from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
+    ASTRO_ENGINE_LOADED = True
 except ImportError as e:
-    print(f"⚠️ Engine import warning: {e}")
+    ASTRO_ENGINE_LOADED = False
+    print(f"⚠️ Astrology / Calendar Engine import warning: {e}")
 
 
 # =====================================================================
-# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE ERRORS)
+# HELPER: SANITIZE JSON RESPONSE (PREVENTS UNICODE DECODE / SERIALIZATION ERRORS)
 # =====================================================================
 def sanitize_response(data):
     """Recursively converts bytes to base64 strings to ensure UTF-8 JSON compliance."""
@@ -71,7 +77,7 @@ def load_odianlp_dictionary():
                             m = item.get("meaning") or item.get("english")
                             if w and m:
                                 ODIA_DICT[w.strip()] = m
-                print(f"✅ Successfully loaded {len(ODIA_DICT)} entries from OdiaNLP dictionary.")
+                print(f"✅ Successfully loaded {len(ODIA_DICT)} entries into OdiaNLP dictionary.")
                 return
         except Exception as e:
             print(f"⚠️ Failed source {url}: {e}")
@@ -92,7 +98,10 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Vedic Astro Engine & Odia NLP OCR API", lifespan=lifespan)
+app = FastAPI(
+    title="Vedic Astro Engine (SwissEph / Jataka) & Odia NLP API", 
+    lifespan=lifespan
+)
 
 # =====================================================================
 # CORS MIDDLEWARE SETUP
@@ -104,6 +113,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# =====================================================================
+# CUSTOM EXCEPTION HANDLER (PREVENTS ENCODING CRASHES ON BAD REQUESTS)
+# =====================================================================
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc):
+    """Safely handles request validation errors without crashing server."""
+    def clean_errors(errors):
+        if isinstance(errors, list):
+            return [clean_errors(e) for e in errors]
+        elif isinstance(errors, dict):
+            return {k: clean_errors(v) for k, v in errors.items()}
+        elif isinstance(errors, bytes):
+            return errors.decode('utf-8', errors='ignore')
+        return errors
+
+    safe_errors = clean_errors(exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={"detail": safe_errors},
+    )
 
 
 # =====================================================================
@@ -138,19 +169,27 @@ def health_check():
         
     return {
         "status": "ok",
+        "astro_engine_loaded": ASTRO_ENGINE_LOADED,
         "gtts_installed": GTTS_AVAILABLE,
         "fitz_installed": fitz_ok,
         "dictionary_entries": len(ODIA_DICT),
-        "message": "Vedic Astro Engine & Odia NLP API Running"
+        "message": "Vedic Astro Engine & Odia Reader Backend Running"
     }
 
 
 # =====================================================================
-# ASTROLOGY KUNDLI CALCULATION ENDPOINT
+# ASTROLOGY KUNDLI CALCULATION ENDPOINT (SWISSEPH / JATAKA)
 # =====================================================================
 @app.post("/api/calculate")
 def calculate_kundli(data: BirthDataRequest):
+    """
+    Calculates D1/D9 Kundli charts, Vimshottari Dasha, Panchanga, 
+    and Rashi details using Swiss Ephemeris & Jataka calculations in engine.py.
+    """
     try:
+        if not ASTRO_ENGINE_LOADED:
+            raise Exception("Astrology calculation engine is not loaded on server.")
+
         result = calculate_astrology(
             date_str=data.date,
             time_str=data.time,
@@ -162,12 +201,16 @@ def calculate_kundli(data: BirthDataRequest):
         )
 
         result["name"] = data.name
-        moon_rashi_en = result["planets_en"]["Moon"]["sign"]
+        
+        # Safely extract Moon sign for daily rashifal
+        moon_rashi_en = result.get("planets_en", {}).get("Moon", {}).get("sign", "Aries")
         result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
 
         return sanitize_response(result)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print("❌ Error inside /api/calculate:")
+        traceback.print_exc()
+        raise HTTPException(status_code=400, detail=f"Calculation Error: {str(e)}")
 
 
 # =====================================================================
@@ -312,7 +355,7 @@ def export_kundli_pdf(data: BirthDataRequest):
         )
         result["name"] = data.name
 
-        moon_rashi_en = result["planets_en"]["Moon"]["sign"]
+        moon_rashi_en = result.get("planets_en", {}).get("Moon", {}).get("sign", "Aries")
         result["rashifal"] = get_daily_rashifal(moon_rashi_en, lang=data.lang)
 
         html_content = build_pdf_html(result, data)
@@ -364,7 +407,7 @@ def fetch_odia_calendar_month(
 
 
 # =====================================================================
-# PDF TEXT EXTRACTION ENDPOINT (HANDLES FILE UPLOADS & REMOTE URLS)
+# PDF TEXT EXTRACTION ENDPOINT (HANDLES LOCAL FILE UPLOADS & REMOTE URLS)
 # =====================================================================
 @app.post("/api/extract-pdf-text")
 async def extract_pdf_page_text(
@@ -372,6 +415,11 @@ async def extract_pdf_page_text(
     page_number: int = Form(1),
     pdf: Optional[UploadFile] = File(None)
 ):
+    """
+    Handles both:
+    1. Local device binary upload via Multipart FormData (file:// or content://)
+    2. Remote Web URL via Form parameter (e.g. https://odiabook.com/...)
+    """
     try:
         pdf_bytes = None
 
@@ -424,7 +472,7 @@ def get_word_details(word: str):
     1. Direct OdiaNLP lookup
     2. Case-insensitive key lookup
     3. Reverse English-to-Odia search (e.g. searching 'major')
-    4. Suffix stripping for inflected Odia words
+    4. Grammatical suffix stripping for inflected Odia words
     5. Dynamic MyMemory Translation API fallback (Guarantees results for ANY word)
     6. Wiktionary fallback
     """
