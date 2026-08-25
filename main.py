@@ -254,7 +254,7 @@ def calculate_kundli(data: BirthDataRequest):
 # PDF HTML
 # =====================================================================
 
-def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
+def build_pdf_html_(result: dict, data: BirthDataRequest) -> str:
     planet_rows = ""
 
     for p_name, p in result.get("planets", {}).items():
@@ -417,6 +417,1412 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
     </html>
     """
 
+def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
+
+    # =========================================================
+    # COMMON HELPERS
+    # =========================================================
+
+    def yes_no(value):
+        return "Yes" if value else "No"
+
+    def safe(value, default="-"):
+        if value is None or value == "":
+            return default
+        return str(value)
+
+    # =========================================================
+    # PLANET TABLE
+    # =========================================================
+
+    planet_rows = ""
+
+    for p_name, p in result.get("planets", {}).items():
+
+        status = []
+
+        if p.get("is_retrograde"):
+            status.append("Retrograde")
+
+        if p.get("is_combust"):
+            status.append("Combust")
+
+        if not status:
+            status.append("Direct")
+
+        planet_rows += f"""
+        <tr>
+            <td>{safe(p_name)}</td>
+
+            <td>
+                {safe(p.get('sign'))}
+            </td>
+
+            <td>
+                {safe(p.get('degree'))}
+            </td>
+
+            <td>
+                {safe(p.get('nakshatra'))}
+            </td>
+
+            <td>
+                {safe(p.get('pada'))}
+            </td>
+
+            <td>
+                {safe(p.get('house'))}
+            </td>
+
+            <td>
+                {safe(p.get('navamsa_sign'))}
+            </td>
+
+            <td>
+                {safe(p.get('dignity'))}
+            </td>
+
+            <td>
+                {", ".join(status)}
+            </td>
+        </tr>
+        """
+
+
+    # =========================================================
+    # HOUSE TABLE
+    # =========================================================
+
+    house_rows = ""
+
+    house_lords = result.get(
+        "house_lords",
+        {}
+    )
+
+    for house_no, house in result.get(
+        "houses",
+        {}
+    ).items():
+
+        planets = house.get(
+            "planets",
+            []
+        )
+
+        lord_info = (
+            house_lords.get(house_no)
+            or
+            house_lords.get(str(house_no))
+            or
+            {}
+        )
+
+        house_rows += f"""
+        <tr>
+            <td>
+                {house_no}
+            </td>
+
+            <td>
+                {safe(house.get('sign'))}
+            </td>
+
+            <td>
+                {safe(
+                    house.get('lord')
+                    or
+                    lord_info.get('lord')
+                )}
+            </td>
+
+            <td>
+                {safe(
+                    lord_info.get(
+                        'lord_house'
+                    )
+                )}
+            </td>
+
+            <td>
+                {
+                    ", ".join(planets)
+                    if planets
+                    else "-"
+                }
+            </td>
+        </tr>
+        """
+
+
+    # =========================================================
+    # PANCHANGA
+    # =========================================================
+
+    panchanga = result.get(
+        "panchanga",
+        {}
+    )
+
+    panchanga_rows = f"""
+        <tr>
+            <td>Tithi</td>
+            <td>{safe(panchanga.get('tithi'))}</td>
+        </tr>
+
+        <tr>
+            <td>Paksha</td>
+            <td>{safe(panchanga.get('paksha'))}</td>
+        </tr>
+
+        <tr>
+            <td>Vara</td>
+            <td>{safe(panchanga.get('vara'))}</td>
+        </tr>
+
+        <tr>
+            <td>Nakshatra</td>
+            <td>{safe(panchanga.get('nakshatra'))}</td>
+        </tr>
+
+        <tr>
+            <td>Yoga</td>
+            <td>{safe(panchanga.get('yoga'))}</td>
+        </tr>
+
+        <tr>
+            <td>Karana</td>
+            <td>{safe(panchanga.get('karana'))}</td>
+        </tr>
+    """
+
+
+    # =========================================================
+    # MAHADASHA TABLE
+    # =========================================================
+
+    dasha_rows = ""
+
+    for d in result.get(
+        "dasha",
+        []
+    ):
+
+        active = (
+            "CURRENT"
+            if d.get("is_active")
+            else ""
+        )
+
+        dasha_rows += f"""
+        <tr>
+            <td>
+                {safe(d.get('lord'))}
+            </td>
+
+            <td>
+                {safe(d.get('start_date'))}
+            </td>
+
+            <td>
+                {safe(d.get('end_date'))}
+            </td>
+
+            <td>
+                {safe(d.get('duration'))}
+            </td>
+
+            <td>
+                {active}
+            </td>
+        </tr>
+        """
+
+
+    # =========================================================
+    # CURRENT DASHA
+    # =========================================================
+
+    vim = result.get(
+        "vimshottari",
+        {}
+    )
+
+    current_md = (
+        vim.get(
+            "current_mahadasha"
+        )
+        or
+        {}
+    )
+
+    current_ad = (
+        vim.get(
+            "current_antardasha"
+        )
+        or
+        {}
+    )
+
+    current_pd = (
+        vim.get(
+            "current_pratyantardasha"
+        )
+        or
+        {}
+    )
+
+    current_dasha_html = f"""
+    <table>
+        <tr>
+            <th>Level</th>
+            <th>Lord</th>
+            <th>Start</th>
+            <th>End</th>
+        </tr>
+
+        <tr>
+            <td>Mahadasha</td>
+            <td>{safe(current_md.get('lord'))}</td>
+            <td>{safe(current_md.get('start_date'))}</td>
+            <td>{safe(current_md.get('end_date'))}</td>
+        </tr>
+
+        <tr>
+            <td>Antardasha</td>
+            <td>{safe(current_ad.get('lord'))}</td>
+            <td>{safe(current_ad.get('start_date'))}</td>
+            <td>{safe(current_ad.get('end_date'))}</td>
+        </tr>
+
+        <tr>
+            <td>Pratyantardasha</td>
+            <td>{safe(current_pd.get('lord'))}</td>
+            <td>{safe(current_pd.get('start_date'))}</td>
+            <td>{safe(current_pd.get('end_date'))}</td>
+        </tr>
+    </table>
+    """
+
+
+    # =========================================================
+    # YOGAS
+    # =========================================================
+
+    yoga_rows = ""
+
+    yogas = result.get(
+        "yogas",
+        []
+    )
+
+    if yogas:
+
+        for yoga in yogas:
+
+            yoga_rows += f"""
+            <tr>
+                <td>
+                    {safe(yoga.get('name'))}
+                </td>
+
+                <td>
+                    {safe(yoga.get('basis'))}
+                </td>
+            </tr>
+            """
+
+    else:
+
+        yoga_rows = """
+        <tr>
+            <td colspan="2">
+                No configured Yoga rule matched.
+            </td>
+        </tr>
+        """
+
+
+    # =========================================================
+    # DOSHAS
+    # =========================================================
+
+    doshas = result.get(
+        "doshas",
+        {}
+    )
+
+    dosha_rows = ""
+
+    dosha_labels = {
+        "manglik":
+            "Manglik Dosha",
+
+        "kaal_sarp":
+            "Kaal Sarp",
+
+        "pitru_indicator":
+            "Pitru Dosha Indicator",
+
+        "sade_sati":
+            "Sade Sati",
+
+        "dhaiya":
+            "Saturn Dhaiya",
+    }
+
+    for key, label in dosha_labels.items():
+
+        item = (
+            doshas.get(key)
+            or
+            {}
+        )
+
+        details = []
+
+        if item.get(
+            "mars_house"
+        ):
+            details.append(
+                f"House: {item.get('mars_house')}"
+            )
+
+        if item.get(
+            "phase"
+        ):
+            details.append(
+                f"Phase: {item.get('phase')}"
+            )
+
+        if item.get(
+            "saturn_sign"
+        ):
+            details.append(
+                f"Saturn: {item.get('saturn_sign')}"
+            )
+
+        if item.get(
+            "basis"
+        ):
+            details.append(
+                str(
+                    item.get("basis")
+                )
+            )
+
+        if item.get(
+            "rule"
+        ):
+            details.append(
+                str(
+                    item.get("rule")
+                )
+            )
+
+        dosha_rows += f"""
+        <tr>
+            <td>
+                {label}
+            </td>
+
+            <td>
+                {
+                    "Present"
+                    if item.get("present")
+                    else "Not Present"
+                }
+            </td>
+
+            <td>
+                {
+                    "<br/>".join(details)
+                    if details
+                    else "-"
+                }
+            </td>
+        </tr>
+        """
+
+
+    # =========================================================
+    # PLANET STRENGTH
+    # =========================================================
+
+    strength = result.get(
+        "strength",
+        {}
+    )
+
+    strength_rows = ""
+
+    for planet, item in (
+        strength.get(
+            "planets",
+            {}
+        )
+    ).items():
+
+        strength_rows += f"""
+        <tr>
+            <td>
+                {planet}
+            </td>
+
+            <td>
+                {safe(item.get('score'))}/100
+            </td>
+
+            <td>
+                {safe(item.get('label'))}
+            </td>
+
+            <td>
+                {safe(item.get('dignity'))}
+            </td>
+
+            <td>
+                {yes_no(item.get('retrograde'))}
+            </td>
+
+            <td>
+                {yes_no(item.get('combust'))}
+            </td>
+        </tr>
+        """
+
+
+    # =========================================================
+    # CURRENT TRANSITS
+    # =========================================================
+
+    transit_rows = ""
+
+    for planet, transit in (
+        result.get(
+            "transits",
+            {}
+        )
+    ).items():
+
+        longitude = transit.get(
+            "longitude_raw",
+            0
+        )
+
+        try:
+            longitude = (
+                f"{float(longitude):.4f}°"
+            )
+
+        except Exception:
+            longitude = safe(
+                longitude
+            )
+
+        transit_rows += f"""
+        <tr>
+            <td>
+                {planet}
+            </td>
+
+            <td>
+                {safe(
+                    transit.get('sign')
+                    or
+                    transit.get('sign_en')
+                )}
+            </td>
+
+            <td>
+                {longitude}
+            </td>
+
+            <td>
+                {
+                    "Retrograde"
+                    if transit.get(
+                        "is_retrograde"
+                    )
+                    else "Direct"
+                }
+            </td>
+        </tr>
+        """
+
+
+    # =========================================================
+    # VARGA CHART DETAILS
+    # =========================================================
+
+    varga_html = ""
+
+    charts = result.get(
+        "charts",
+        {}
+    )
+
+    preferred_order = [
+        "D1",
+        "D2",
+        "D3",
+        "D4",
+        "D7",
+        "D9",
+        "D10",
+        "D12",
+        "D16",
+        "D20",
+        "D24",
+        "D27",
+        "D30",
+        "D40",
+        "D45",
+        "D60",
+    ]
+
+    for chart_name in preferred_order:
+
+        chart = charts.get(
+            chart_name
+        )
+
+        if not chart:
+            continue
+
+        rows = ""
+
+        for house_no, house in (
+            chart.get(
+                "houses",
+                {}
+            )
+        ).items():
+
+            planets = house.get(
+                "planets",
+                []
+            )
+
+            rows += f"""
+            <tr>
+                <td>
+                    {house_no}
+                </td>
+
+                <td>
+                    {safe(house.get('sign'))}
+                </td>
+
+                <td>
+                    {
+                        ", ".join(planets)
+                        if planets
+                        else "-"
+                    }
+                </td>
+            </tr>
+            """
+
+        varga_html += f"""
+        <div class="subsection-title">
+            {chart_name}
+        </div>
+
+        <div class="small-info">
+            Lagna:
+            <strong>
+                {safe(chart.get('lagna_sign'))}
+            </strong>
+        </div>
+
+        <table>
+            <tr>
+                <th>House</th>
+                <th>Rashi</th>
+                <th>Planets</th>
+            </tr>
+
+            {rows}
+
+        </table>
+        """
+
+
+    # =========================================================
+    # DAILY RASHIFAL
+    # =========================================================
+
+    rashifal = result.get(
+        "rashifal",
+        {}
+    )
+
+    rashifal_html = ""
+
+    if rashifal:
+
+        rashifal_html = f"""
+        <table>
+            <tr>
+                <td>
+                    <strong>
+                        Overall
+                    </strong>
+                </td>
+
+                <td>
+                    {safe(rashifal.get('overall'))}
+                </td>
+            </tr>
+
+            <tr>
+                <td>
+                    <strong>
+                        Career
+                    </strong>
+                </td>
+
+                <td>
+                    {safe(rashifal.get('career'))}
+                </td>
+            </tr>
+
+            <tr>
+                <td>
+                    <strong>
+                        Finance
+                    </strong>
+                </td>
+
+                <td>
+                    {safe(rashifal.get('finance'))}
+                </td>
+            </tr>
+
+            <tr>
+                <td>
+                    <strong>
+                        Love
+                    </strong>
+                </td>
+
+                <td>
+                    {safe(rashifal.get('love'))}
+                </td>
+            </tr>
+
+            <tr>
+                <td>
+                    <strong>
+                        Health
+                    </strong>
+                </td>
+
+                <td>
+                    {safe(rashifal.get('health'))}
+                </td>
+            </tr>
+
+            <tr>
+                <td>
+                    <strong>
+                        Lucky Number
+                    </strong>
+                </td>
+
+                <td>
+                    {safe(rashifal.get('lucky_number'))}
+                </td>
+            </tr>
+
+            <tr>
+                <td>
+                    <strong>
+                        Lucky Color
+                    </strong>
+                </td>
+
+                <td>
+                    {safe(rashifal.get('lucky_color'))}
+                </td>
+            </tr>
+        </table>
+        """
+
+
+    # =========================================================
+    # NOTES
+    # =========================================================
+
+    notes_html = ""
+
+    for note in result.get(
+        "calculation_notes",
+        []
+    ):
+
+        notes_html += (
+            f"<div class='note'>• {note}</div>"
+        )
+
+
+    # =========================================================
+    # COMPLETE PDF HTML
+    # =========================================================
+
+    return f"""
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<style>
+
+@page {{
+    size: A4;
+    margin: 14mm;
+}}
+
+body {{
+    font-family:
+        Helvetica,
+        Arial,
+        sans-serif;
+
+    color: #1e293b;
+
+    font-size: 10px;
+
+    line-height: 1.45;
+}}
+
+
+/* ======================================
+   HEADER
+====================================== */
+
+.header {{
+    text-align: center;
+
+    border-bottom:
+        3px solid #b71c1c;
+
+    padding-bottom:
+        10px;
+
+    margin-bottom:
+        14px;
+}}
+
+.main-title {{
+    font-size:
+        21px;
+
+    font-weight:
+        bold;
+
+    color:
+        #b71c1c;
+
+    margin:
+        0;
+}}
+
+.subtitle {{
+    color:
+        #64748b;
+
+    font-size:
+        9px;
+
+    margin-top:
+        4px;
+}}
+
+
+/* ======================================
+   SECTION HEADINGS
+====================================== */
+
+.section-title {{
+    background-color:
+        #b71c1c;
+
+    color:
+        #ffffff;
+
+    font-size:
+        13px;
+
+    font-weight:
+        bold;
+
+    padding:
+        7px;
+
+    margin-top:
+        16px;
+
+    margin-bottom:
+        8px;
+}}
+
+.subsection-title {{
+    color:
+        #b71c1c;
+
+    border-bottom:
+        1px solid #b71c1c;
+
+    font-size:
+        11px;
+
+    font-weight:
+        bold;
+
+    padding-bottom:
+        3px;
+
+    margin-top:
+        12px;
+
+    margin-bottom:
+        6px;
+}}
+
+
+/* ======================================
+   TABLES
+====================================== */
+
+table {{
+    width:
+        100%;
+
+    border-collapse:
+        collapse;
+
+    margin-bottom:
+        10px;
+}}
+
+th {{
+    border:
+        1px solid #94a3b8;
+
+    background-color:
+        #f1f5f9;
+
+    color:
+        #0f172a;
+
+    font-weight:
+        bold;
+
+    padding:
+        5px;
+
+    font-size:
+        8px;
+
+    text-align:
+        left;
+}}
+
+td {{
+    border:
+        1px solid #cbd5e1;
+
+    padding:
+        5px;
+
+    vertical-align:
+        top;
+
+    font-size:
+        8px;
+}}
+
+
+/* ======================================
+   INFO BOX
+====================================== */
+
+.birth-box {{
+    background-color:
+        #fffbeb;
+
+    border:
+        1px solid #fde68a;
+
+    padding:
+        10px;
+
+    margin-bottom:
+        12px;
+}}
+
+.small-info {{
+    background-color:
+        #f8fafc;
+
+    border:
+        1px solid #e2e8f0;
+
+    padding:
+        6px;
+
+    margin-bottom:
+        6px;
+}}
+
+.note {{
+    background-color:
+        #eff6ff;
+
+    border-bottom:
+        1px solid #bfdbfe;
+
+    padding:
+        5px;
+
+    color:
+        #475569;
+
+    font-size:
+        8px;
+}}
+
+.page-break {{
+    page-break-before:
+        always;
+}}
+
+</style>
+
+</head>
+
+
+<body>
+
+
+<!-- =====================================================
+     HEADER
+===================================================== -->
+
+<div class="header">
+
+    <div class="main-title">
+        Vedic Jatak / Kundli Report
+    </div>
+
+    <div class="subtitle">
+        Swiss Ephemeris Based Astrology Calculation
+    </div>
+
+</div>
+
+
+<!-- =====================================================
+     BIRTH DETAILS
+===================================================== -->
+
+<div class="section-title">
+    Birth Details
+</div>
+
+<div class="birth-box">
+
+<table>
+
+<tr>
+
+<td>
+<strong>Name</strong>
+</td>
+
+<td>
+{safe(data.name)}
+</td>
+
+<td>
+<strong>Date</strong>
+</td>
+
+<td>
+{safe(data.date)}
+</td>
+
+</tr>
+
+
+<tr>
+
+<td>
+<strong>Time</strong>
+</td>
+
+<td>
+{safe(data.time)}
+</td>
+
+<td>
+<strong>Timezone</strong>
+</td>
+
+<td>
+UTC {data.tz_offset:+}
+</td>
+
+</tr>
+
+
+<tr>
+
+<td>
+<strong>Latitude</strong>
+</td>
+
+<td>
+{safe(data.latitude)}
+</td>
+
+<td>
+<strong>Longitude</strong>
+</td>
+
+<td>
+{safe(data.longitude)}
+</td>
+
+</tr>
+
+
+<tr>
+
+<td>
+<strong>Ayanamsha</strong>
+</td>
+
+<td>
+{safe(result.get('ayanamsha_mode'))}
+</td>
+
+<td>
+<strong>Ayanamsha Value</strong>
+</td>
+
+<td>
+{safe(result.get('ayanamsha_value'))}
+</td>
+
+</tr>
+
+
+<tr>
+
+<td>
+<strong>Node Type</strong>
+</td>
+
+<td>
+{safe(result.get('node_type'))}
+</td>
+
+<td>
+<strong>Lagna</strong>
+</td>
+
+<td>
+{safe(result.get('lagna', {}).get('sign'))}
+</td>
+
+</tr>
+
+</table>
+
+</div>
+
+
+<!-- =====================================================
+     LAGNA
+===================================================== -->
+
+<div class="section-title">
+    Lagna Details
+</div>
+
+<table>
+
+<tr>
+<th>Rashi</th>
+<th>Degree</th>
+<th>Nakshatra</th>
+<th>Pada</th>
+<th>Navamsa</th>
+</tr>
+
+<tr>
+
+<td>
+{safe(result.get('lagna', {}).get('sign'))}
+</td>
+
+<td>
+{safe(result.get('lagna', {}).get('degree'))}
+</td>
+
+<td>
+{safe(result.get('lagna', {}).get('nakshatra'))}
+</td>
+
+<td>
+{safe(result.get('lagna', {}).get('pada'))}
+</td>
+
+<td>
+{safe(result.get('lagna', {}).get('navamsa_sign'))}
+</td>
+
+</tr>
+
+</table>
+
+
+<!-- =====================================================
+     PLANETS
+===================================================== -->
+
+<div class="section-title">
+    Planetary Positions
+</div>
+
+<table>
+
+<tr>
+<th>Planet</th>
+<th>Rashi</th>
+<th>Degree</th>
+<th>Nakshatra</th>
+<th>Pada</th>
+<th>House</th>
+<th>D9</th>
+<th>Dignity</th>
+<th>Status</th>
+</tr>
+
+{planet_rows}
+
+</table>
+
+
+<!-- =====================================================
+     HOUSES
+===================================================== -->
+
+<div class="section-title">
+    12 Bhava / House Details
+</div>
+
+<table>
+
+<tr>
+<th>House</th>
+<th>Rashi</th>
+<th>Lord</th>
+<th>Lord Placed</th>
+<th>Planets</th>
+</tr>
+
+{house_rows}
+
+</table>
+
+
+<!-- =====================================================
+     PANCHANGA
+===================================================== -->
+
+<div class="section-title">
+    Panchanga
+</div>
+
+<table>
+
+<tr>
+<th>Item</th>
+<th>Details</th>
+</tr>
+
+{panchanga_rows}
+
+</table>
+
+
+<!-- =====================================================
+     DASHA
+===================================================== -->
+
+<div class="section-title">
+    Current Vimshottari Period
+</div>
+
+{current_dasha_html}
+
+
+<div class="subsection-title">
+    Mahadasha Timeline
+</div>
+
+<table>
+
+<tr>
+<th>Lord</th>
+<th>Start</th>
+<th>End</th>
+<th>Years</th>
+<th>Status</th>
+</tr>
+
+{dasha_rows}
+
+</table>
+
+
+<!-- =====================================================
+     YOGAS
+===================================================== -->
+
+<div class="section-title">
+    Yogas
+</div>
+
+<table>
+
+<tr>
+<th>Yoga</th>
+<th>Calculation Basis</th>
+</tr>
+
+{yoga_rows}
+
+</table>
+
+
+<!-- =====================================================
+     DOSHAS
+===================================================== -->
+
+<div class="section-title">
+    Dosha Analysis
+</div>
+
+<table>
+
+<tr>
+<th>Dosha</th>
+<th>Status</th>
+<th>Details</th>
+</tr>
+
+{dosha_rows}
+
+</table>
+
+
+<!-- =====================================================
+     PLANET STRENGTH
+===================================================== -->
+
+<div class="section-title">
+    Planet Strength
+</div>
+
+<div class="small-info">
+{safe(strength.get('note'))}
+</div>
+
+<table>
+
+<tr>
+<th>Planet</th>
+<th>Score</th>
+<th>Strength</th>
+<th>Dignity</th>
+<th>Retrograde</th>
+<th>Combust</th>
+</tr>
+
+{strength_rows}
+
+</table>
+
+
+<!-- =====================================================
+     TRANSITS
+===================================================== -->
+
+<div class="section-title">
+    Current Gochar / Transit
+</div>
+
+<table>
+
+<tr>
+<th>Planet</th>
+<th>Rashi</th>
+<th>Longitude</th>
+<th>Motion</th>
+</tr>
+
+{transit_rows}
+
+</table>
+
+
+<!-- =====================================================
+     VARGA
+===================================================== -->
+
+<div class="page-break"></div>
+
+<div class="section-title">
+    Divisional / Varga Charts
+</div>
+
+{varga_html}
+
+
+<!-- =====================================================
+     RASHIFAL
+===================================================== -->
+
+<div class="section-title">
+    Daily Rashifal
+</div>
+
+{rashifal_html}
+
+
+<!-- =====================================================
+     NOTES
+===================================================== -->
+
+<div class="section-title">
+    Calculation Notes
+</div>
+
+{notes_html}
+
+
+</body>
+
+</html>
+"""
 
 # =====================================================================
 # PDF EXPORT

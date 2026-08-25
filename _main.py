@@ -17,7 +17,7 @@ import fitz  # PyMuPDF
 
 # Safe local engine imports (engine.py & odia_calendar.py)
 try:
-    from engine import calculate_astrology, get_daily_rashifal
+    from _engine import calculate_astrology, get_daily_rashifal
     from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
     ASTRO_ENGINE_LOADED = True
     print("✅ Astrology & Odia Calendar Engines loaded successfully!")
