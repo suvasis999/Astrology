@@ -15,6 +15,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
+
+from weasyprint import HTML
 import fitz  # PyMuPDF
 
 # =====================================================================
@@ -2288,8 +2290,8 @@ td {{
 # PDF EXPORT
 # =====================================================================
 
-@app.post("/api/export-pdf")
-def export_kundli_pdf(
+@app.post("/api/export-pdfdd")
+def export_kundli_pdfdd(
     data: BirthDataRequest
 ):
 
@@ -2534,6 +2536,103 @@ def export_kundli_pdf(
             ),
         )
 
+
+@app.post("/api/export-pdf")
+def export_kundli_pdf(
+    data: BirthDataRequest
+):
+    try:
+
+        if not ASTRO_ENGINE_LOADED:
+            raise Exception(
+                "Astrology calculation engine is not loaded."
+            )
+
+        font_name, font_path = get_pdf_font(
+            data.lang
+        )
+
+        if not os.path.exists(font_path):
+            raise Exception(
+                f"Required PDF font is missing: {font_path}"
+            )
+
+        result = calculate_astrology(
+            date_str=data.date,
+            time_str=data.time,
+            latitude=data.latitude,
+            longitude=data.longitude,
+            tz_offset=data.tz_offset,
+            ayanamsha_mode=data.ayanamsha,
+            lang=data.lang,
+            node_type=data.node_type,
+        )
+
+        result["name"] = data.name
+
+        moon_rashi_en = (
+            result
+            .get("planets_en", {})
+            .get("Moon", {})
+            .get("sign_en", "Aries")
+        )
+
+        result["rashifal"] = get_daily_rashifal(
+            moon_rashi_en,
+            lang=data.lang,
+        )
+
+        html_content = build_pdf_html(
+            result,
+            data
+        )
+
+        # -----------------------------------------
+        # IMPORTANT:
+        # Use WeasyPrint instead of xhtml2pdf
+        # -----------------------------------------
+
+        pdf_bytes = HTML(
+            string=html_content,
+            base_url=BASE_DIR
+        ).write_pdf()
+
+        if not pdf_bytes:
+            raise Exception(
+                "Generated PDF is empty."
+            )
+
+        pdf_base64 = base64.b64encode(
+            pdf_bytes
+        ).decode("utf-8")
+
+        safe_name = re.sub(
+            r"[^A-Za-z0-9_-]+",
+            "_",
+            data.name
+        ).strip("_")
+
+        filename = (
+            f"Jatak_"
+            f"{safe_name or 'Report'}"
+            f".pdf"
+        )
+
+        return {
+            "status": "success",
+            "filename": filename,
+            "pdf_base64": pdf_base64,
+            "font": font_name,
+        }
+
+    except Exception as e:
+
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=400,
+            detail=f"PDF Export Error: {str(e)}"
+        )
 # =====================================================================
 # ODIA CALENDAR
 # =====================================================================
