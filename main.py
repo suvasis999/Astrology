@@ -275,7 +275,7 @@ def calculate_kp_details(result: dict, data: "BirthDataRequest") -> dict:
     KP calculation layer.
 
     Uses:
-    - Swiss Ephemeris Krishnamurti sidereal mode
+   
     - Placidus cusps
     - Vimshottari proportional Star/Sub/Sub-Sub divisions
 
@@ -415,7 +415,7 @@ def calculate_kp_details(result: dict, data: "BirthDataRequest") -> dict:
             "ruling_planets": ruling_planets,
             "note": (
                 "KP Star/Sub/Sub-Sub divisions use Vimshottari proportions. "
-                "Cusps are sidereal Placidus cusps calculated with Swiss Ephemeris."
+                "Cusps are sidereal Placidus cusp"
             ),
         }
 
@@ -2192,7 +2192,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         )
 
         report_subtitle = (
-            "Swiss Ephemeris ଆଧାରିତ "
+            ""
             "ବୈଦିକ ଜ୍ୟୋତିଷ ଗଣନା"
         )
 
@@ -2202,7 +2202,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         )
 
         report_subtitle = (
-            "Swiss Ephemeris आधारित "
+            ""
             "वैदिक ज्योतिष गणना"
         )
 
@@ -2212,7 +2212,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         )
 
         report_subtitle = (
-            "Swiss Ephemeris Based "
+            ""
             "Vedic Astrology Calculation"
         )
 
