@@ -395,8 +395,8 @@ def build_pdf_html_(result: dict, data: BirthDataRequest) -> str:
     <body>
 
         <div class="header">
-            <h1 class="title">Vedic Horoscope & Kundli Report</h1>
-            <div class="subtitle">Generated via Swiss Ephemeris based Vedic Astro Engine</div>
+            <h1 class="title">Pustak -Vedic Horoscope & Kundli Report</h1>
+           
         </div>
 
         <div class="info-box">
@@ -1295,7 +1295,7 @@ def build_pdf_html(
         )
 
         report_subtitle = (
-            "Swiss Ephemeris ଆଧାରିତ "
+            " "
             "ବୈଦିକ ଜ୍ୟୋତିଷ ଗଣନା"
         )
 
@@ -1306,7 +1306,7 @@ def build_pdf_html(
         )
 
         report_subtitle = (
-            "Swiss Ephemeris आधारित "
+            ""
             "वैदिक ज्योतिष गणना"
         )
 
@@ -1317,7 +1317,7 @@ def build_pdf_html(
         )
 
         report_subtitle = (
-            "Swiss Ephemeris Based "
+            " "
             "Vedic Astrology Calculation"
         )
 
