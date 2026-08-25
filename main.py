@@ -17,6 +17,10 @@ from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
 import fitz  # PyMuPDF
 
+# =====================================================================
+# PDF FONT CONFIGURATION
+# =====================================================================
+
 BASE_DIR = os.path.dirname(
     os.path.abspath(__file__)
 )
@@ -31,7 +35,7 @@ ODIA_FONT_PATH = os.path.join(
     "NotoSansOriya-Regular.ttf"
 )
 
-HINDI_FONT_PATH = os.path.join(
+DEVANAGARI_FONT_PATH = os.path.join(
     FONT_DIR,
     "NotoSansDevanagari-Regular.ttf"
 )
@@ -40,6 +44,27 @@ ENGLISH_FONT_PATH = os.path.join(
     FONT_DIR,
     "NotoSans-Regular.ttf"
 )
+
+
+def get_pdf_font(lang: str):
+    lang = (lang or "en").lower()
+
+    if lang == "or":
+        return (
+            "OdiaFont",
+            ODIA_FONT_PATH
+        )
+
+    if lang == "hi":
+        return (
+            "HindiFont",
+            DEVANAGARI_FONT_PATH
+        )
+
+    return (
+        "EnglishFont",
+        ENGLISH_FONT_PATH
+    )
 
 try:
     from engine import calculate_astrology, get_daily_rashifal
