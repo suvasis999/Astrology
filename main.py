@@ -6,6 +6,10 @@ import re
 import requests
 import traceback
 import unicodedata
+import html
+import math
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 from contextlib import asynccontextmanager
 
@@ -14,15 +18,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from xhtml2pdf import pisa
-
-
-
 from weasyprint import HTML
+import swisseph as swe
 import fitz  # PyMuPDF
-
-import html
-from pathlib import Path
 
 # =====================================================================
 # PDF FONT CONFIGURATION
@@ -127,6 +125,313 @@ def clean_unicode_text(text: str) -> str:
     )
 
 
+
+# =====================================================================
+# KP (KRISHNAMURTI PADDHATI) HELPERS
+# =====================================================================
+
+KP_DASHA_ORDER = [
+    ("Ketu", 7),
+    ("Venus", 20),
+    ("Sun", 6),
+    ("Moon", 10),
+    ("Mars", 7),
+    ("Rahu", 18),
+    ("Jupiter", 16),
+    ("Saturn", 19),
+    ("Mercury", 17),
+]
+
+KP_NAKSHATRAS = [
+    "Ashwini", "Bharani", "Krittika", "Rohini", "Mrigashira",
+    "Ardra", "Punarvasu", "Pushya", "Ashlesha", "Magha",
+    "Purva Phalguni", "Uttara Phalguni", "Hasta", "Chitra", "Swati",
+    "Vishakha", "Anuradha", "Jyeshtha", "Mula", "Purva Ashadha",
+    "Uttara Ashadha", "Shravana", "Dhanishta", "Shatabhisha",
+    "Purva Bhadrapada", "Uttara Bhadrapada", "Revati",
+]
+
+KP_SIGN_NAMES = [
+    "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
+    "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces",
+]
+
+KP_SIGN_LORDS = {
+    "Aries": "Mars", "Taurus": "Venus", "Gemini": "Mercury",
+    "Cancer": "Moon", "Leo": "Sun", "Virgo": "Mercury",
+    "Libra": "Venus", "Scorpio": "Mars", "Sagittarius": "Jupiter",
+    "Capricorn": "Saturn", "Aquarius": "Saturn", "Pisces": "Jupiter",
+}
+
+
+def _norm360(value: float) -> float:
+    return float(value) % 360.0
+
+
+def _kp_sign(longitude: float):
+    lon = _norm360(longitude)
+    sign_index = int(lon // 30)
+    return KP_SIGN_NAMES[sign_index], lon % 30.0, sign_index + 1
+
+
+def _kp_sequence_from(lord: str):
+    names = [x[0] for x in KP_DASHA_ORDER]
+    try:
+        start = names.index(lord)
+    except ValueError:
+        start = 0
+    return KP_DASHA_ORDER[start:] + KP_DASHA_ORDER[:start]
+
+
+def _kp_lords_for_longitude(longitude: float):
+    """Return KP Nakshatra/Star lord, Sub lord and Sub-Sub lord."""
+    lon = _norm360(longitude)
+    nak_len = 360.0 / 27.0
+    nak_index = int(lon // nak_len)
+    nak_start = nak_index * nak_len
+    offset = lon - nak_start
+
+    star_lord = KP_DASHA_ORDER[nak_index % 9][0]
+    star_seq = _kp_sequence_from(star_lord)
+
+    sub_lord = star_lord
+    sub_start = 0.0
+    sub_end = nak_len
+    cursor = 0.0
+
+    for lord, years in star_seq:
+        span = nak_len * (years / 120.0)
+        if offset <= cursor + span + 1e-12:
+            sub_lord = lord
+            sub_start = cursor
+            sub_end = cursor + span
+            break
+        cursor += span
+
+    sub_span = max(sub_end - sub_start, 1e-12)
+    sub_offset = max(0.0, offset - sub_start)
+    subsub_lord = sub_lord
+    cursor = 0.0
+
+    for lord, years in _kp_sequence_from(sub_lord):
+        span = sub_span * (years / 120.0)
+        if sub_offset <= cursor + span + 1e-12:
+            subsub_lord = lord
+            break
+        cursor += span
+
+    pada = int((offset % nak_len) // (nak_len / 4.0)) + 1
+
+    return {
+        "nakshatra": KP_NAKSHATRAS[nak_index],
+        "nakshatra_number": nak_index + 1,
+        "pada": min(4, pada),
+        "star_lord": star_lord,
+        "sub_lord": sub_lord,
+        "sub_sub_lord": subsub_lord,
+    }
+
+
+def _extract_planet_longitude(planet_data: dict):
+    if not isinstance(planet_data, dict):
+        return None
+
+    for key in ("longitude_raw", "longitude", "lon", "absolute_longitude"):
+        value = planet_data.get(key)
+        try:
+            if value is not None:
+                return _norm360(float(value))
+        except Exception:
+            pass
+
+    return None
+
+
+def _birth_julian_day_ut(data: "BirthDataRequest") -> float:
+    local_dt = datetime.strptime(
+        f"{data.date} {data.time}",
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    utc_dt = local_dt - timedelta(hours=float(data.tz_offset))
+
+    hour = (
+        utc_dt.hour
+        + utc_dt.minute / 60.0
+        + utc_dt.second / 3600.0
+        + utc_dt.microsecond / 3_600_000_000.0
+    )
+
+    return swe.julday(
+        utc_dt.year,
+        utc_dt.month,
+        utc_dt.day,
+        hour,
+    )
+
+
+def calculate_kp_details(result: dict, data: "BirthDataRequest") -> dict:
+    """
+    KP calculation layer.
+
+    Uses:
+    - Swiss Ephemeris Krishnamurti sidereal mode
+    - Placidus cusps
+    - Vimshottari proportional Star/Sub/Sub-Sub divisions
+
+    This supplies calculation data, not a full predictive judgement engine.
+    """
+    try:
+        jd_ut = _birth_julian_day_ut(data)
+
+        swe.set_sid_mode(
+            swe.SIDM_KRISHNAMURTI,
+            0,
+            0,
+        )
+
+        ayanamsha_value = float(
+            swe.get_ayanamsa_ut(jd_ut)
+        )
+
+        try:
+            cusps, ascmc = swe.houses_ex(
+                jd_ut,
+                float(data.latitude),
+                float(data.longitude),
+                b"P",
+                swe.FLG_SIDEREAL,
+            )
+        except TypeError:
+            cusps, ascmc = swe.houses_ex(
+                jd_ut,
+                float(data.latitude),
+                float(data.longitude),
+                b"P",
+                flags=swe.FLG_SIDEREAL,
+            )
+
+        cusp_values = list(cusps)
+        if len(cusp_values) > 12:
+            cusp_values = cusp_values[-12:]
+
+        kp_cusps = {}
+
+        for idx, cusp_lon in enumerate(
+            cusp_values[:12],
+            start=1,
+        ):
+            cusp_lon = _norm360(cusp_lon)
+            sign, degree_in_sign, sign_no = _kp_sign(cusp_lon)
+            lords = _kp_lords_for_longitude(cusp_lon)
+
+            kp_cusps[str(idx)] = {
+                "cusp": idx,
+                "longitude": round(cusp_lon, 6),
+                "sign": sign,
+                "sign_number": sign_no,
+                "degree_in_sign": round(degree_in_sign, 6),
+                "sign_lord": KP_SIGN_LORDS.get(sign),
+                **lords,
+            }
+
+        planets_source = (
+            result.get("planets_en")
+            or result.get("planets")
+            or {}
+        )
+
+        kp_planets = {}
+
+        for planet_name, pdata in planets_source.items():
+            lon = _extract_planet_longitude(pdata)
+
+            if lon is None:
+                continue
+
+            sign, degree_in_sign, sign_no = _kp_sign(lon)
+            lords = _kp_lords_for_longitude(lon)
+
+            kp_planets[str(planet_name)] = {
+                "longitude": round(lon, 6),
+                "sign": sign,
+                "sign_number": sign_no,
+                "degree_in_sign": round(degree_in_sign, 6),
+                "sign_lord": KP_SIGN_LORDS.get(sign),
+                **lords,
+            }
+
+        asc_lon = _norm360(ascmc[0]) if ascmc else None
+        asc_info = (
+            _kp_lords_for_longitude(asc_lon)
+            if asc_lon is not None
+            else {}
+        )
+        asc_sign = (
+            _kp_sign(asc_lon)[0]
+            if asc_lon is not None
+            else None
+        )
+
+        moon = kp_planets.get("Moon") or {}
+
+        weekday_lords = [
+            "Moon",
+            "Mars",
+            "Mercury",
+            "Jupiter",
+            "Venus",
+            "Saturn",
+            "Sun",
+        ]
+
+        local_dt = datetime.strptime(
+            f"{data.date} {data.time}",
+            "%Y-%m-%d %H:%M:%S",
+        )
+
+        ruling_planets = {
+            "day_lord": weekday_lords[local_dt.weekday()],
+            "ascendant_sign_lord": (
+                KP_SIGN_LORDS.get(asc_sign)
+                if asc_sign
+                else None
+            ),
+            "ascendant_star_lord": asc_info.get("star_lord"),
+            "ascendant_sub_lord": asc_info.get("sub_lord"),
+            "moon_sign_lord": moon.get("sign_lord"),
+            "moon_star_lord": moon.get("star_lord"),
+            "moon_sub_lord": moon.get("sub_lord"),
+        }
+
+        return {
+            "status": "success",
+            "system": "Krishnamurti Paddhati (KP)",
+            "house_system": "Placidus",
+            "ayanamsha": "KRISHNAMURTI",
+            "ayanamsha_value": round(ayanamsha_value, 8),
+            "planets": kp_planets,
+            "cusps": kp_cusps,
+            "ruling_planets": ruling_planets,
+            "note": (
+                "KP Star/Sub/Sub-Sub divisions use Vimshottari proportions. "
+                "Cusps are sidereal Placidus cusps calculated with Swiss Ephemeris."
+            ),
+        }
+
+    except Exception as exc:
+        traceback.print_exc()
+
+        return {
+            "status": "error",
+            "system": "Krishnamurti Paddhati (KP)",
+            "message": str(exc),
+            "planets": {},
+            "cusps": {},
+            "ruling_planets": {},
+        }
+
+
 # =====================================================================
 # ODIA DICTIONARY
 # =====================================================================
@@ -188,7 +493,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Vedic Astro Engine & Kohinoor Odia Reader Server",
-    version="2.0.0",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -230,6 +535,7 @@ class BirthDataRequest(BaseModel):
     ayanamsha: str = Field("LAHIRI", example="LAHIRI")
     lang: str = Field("en", example="or")
     node_type: str = Field("MEAN", example="MEAN")
+    chart_style: str = Field("ODIA", example="ODIA")
 
 
 # =====================================================================
@@ -253,7 +559,7 @@ def health_check():
 
     return {
         "status": "ok",
-        "version": "2.1.0",
+        "version": "2.2.0",
 
         "astro_engine_loaded":
             ASTRO_ENGINE_LOADED,
@@ -263,6 +569,12 @@ def health_check():
 
         "fitz_installed":
             fitz_ok,
+
+        "weasyprint_installed":
+            True,
+
+        "kp_enabled":
+            True,
 
         "dictionary_entries":
             len(ODIA_DICT),
@@ -320,6 +632,13 @@ def calculate_kundli(data: BirthDataRequest):
             lang=data.lang,
         )
 
+        # KP calculation is kept independent and always uses
+        # Krishnamurti ayanamsha + Placidus cusps.
+        result["kp"] = calculate_kp_details(
+            result,
+            data,
+        )
+
         return sanitize_response(result)
 
     except Exception as e:
@@ -331,886 +650,72 @@ def calculate_kundli(data: BirthDataRequest):
         )
 
 
+
+# =====================================================================
+# KP ENDPOINT
+# =====================================================================
+
+@app.post("/api/kp")
+def calculate_kp(data: BirthDataRequest):
+    try:
+        if not ASTRO_ENGINE_LOADED:
+            raise Exception(
+                "Astrology calculation engine is not loaded on server."
+            )
+
+        result = calculate_astrology(
+            date_str=data.date,
+            time_str=data.time,
+            latitude=data.latitude,
+            longitude=data.longitude,
+            tz_offset=data.tz_offset,
+            ayanamsha_mode="KRISHNAMURTI",
+            lang="en",
+            node_type=data.node_type,
+        )
+
+        return sanitize_response({
+            "status": "success",
+            "name": data.name,
+            "kp": calculate_kp_details(
+                result,
+                data,
+            ),
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=400,
+            detail=f"KP Calculation Error: {str(e)}",
+        )
+
+
 # =====================================================================
 # PDF HTML
 # =====================================================================
-def build_square_varga_chart(
-    chart_name: str,
-    chart: dict
-) -> str:
 
-    houses = chart.get(
-        "houses",
-        {}
-    )
-
-    def get_house(num):
-        return (
-            houses.get(num)
-            or houses.get(str(num))
-            or {}
-        )
-
-    def house_html(num):
-
-        h = get_house(num)
-
-        sign = (
-            h.get("sign")
-            or h.get("sign_en")
-            or "-"
-        )
-
-        planets = (
-            h.get("planets")
-            or []
-        )
-
-        planet_text = (
-            ", ".join(planets)
-            if planets
-            else "-"
-        )
-
-        return f"""
-        <div class="kundli-cell">
-
-            <div class="kundli-house">
-                H{num}
-            </div>
-
-            <div class="kundli-sign">
-                {sign}
-            </div>
-
-            <div class="kundli-planets">
-                {planet_text}
-            </div>
-
-        </div>
-        """
-
-
-    # 4 x 4 South / East Indian square layout
-    #
-    # 12 | 1 | 2 | 3
-    # 11 |       | 4
-    # 10 |       | 5
-    #  9 | 8 | 7 | 6
-
-    return f"""
-    <div class="kundli-block">
-
-        <div class="kundli-chart-title">
-            {chart_name}
-        </div>
-
-        <div class="kundli-lagna">
-            Lagna:
-            {chart.get('lagna_sign', '-')}
-        </div>
-
-        <div class="kundli-grid">
-
-            {house_html(12)}
-
-            {house_html(1)}
-
-            {house_html(2)}
-
-            {house_html(3)}
-
-
-            {house_html(11)}
-
-            <div class="kundli-center"
-                 style="grid-column:2 / span 2;
-                        grid-row:2 / span 2;">
-
-                <div class="kundli-center-name">
-                    {chart_name}
-                </div>
-
-                <div class="kundli-center-lagna">
-                    Lagna
-                </div>
-
-                <div class="kundli-center-value">
-                    {chart.get('lagna_sign', '-')}
-                </div>
-
-            </div>
-
-            {house_html(4)}
-
-
-            {house_html(10)}
-
-            {house_html(5)}
-
-
-            {house_html(9)}
-
-            {house_html(8)}
-
-            {house_html(7)}
-
-            {house_html(6)}
-
-        </div>
-
-    </div>
-    """
-
-def build_pdf_html_(result: dict, data: BirthDataRequest) -> str:
-    planet_rows = ""
-
-    for p_name, p in result.get("planets", {}).items():
-        planet_rows += f"""
-        <tr>
-            <td style="padding:6px;font-weight:bold;color:#b71c1c;">{p_name}</td>
-            <td style="padding:6px;">{p.get('sign', '')}</td>
-            <td style="padding:6px;font-family:monospace;color:#d97706;">{p.get('degree', '')}</td>
-            <td style="padding:6px;">{p.get('nakshatra', '')} ({p.get('pada', '')})</td>
-            <td style="padding:6px;">{p.get('house', '')}</td>
-            <td style="padding:6px;">{p.get('navamsa_sign', '')}</td>
-            <td style="padding:6px;">{'Yes' if p.get('is_retrograde') else 'No'}</td>
-            <td style="padding:6px;">{'Yes' if p.get('is_combust') else 'No'}</td>
-        </tr>
-        """
-
-    dasha_rows = ""
-    for d in result.get("dasha", []):
-        bg_style = "background-color:#fff7ed;font-weight:bold;" if d.get("is_active") else ""
-        active_tag = " (CURRENT)" if d.get("is_active") else ""
-        dasha_rows += f"""
-        <tr style="{bg_style}">
-            <td style="padding:6px;">{d.get('lord', '')} Mahadasha{active_tag}</td>
-            <td style="padding:6px;">{d.get('start_date', '')}</td>
-            <td style="padding:6px;">{d.get('end_date', '')}</td>
-            <td style="padding:6px;">{d.get('duration', '')} yrs</td>
-        </tr>
-        """
-
-    yoga_rows = ""
-    for y in result.get("yogas", []):
-        yoga_rows += f"""
-        <tr>
-            <td style="padding:6px;font-weight:bold;">{y.get('name', '')}</td>
-            <td style="padding:6px;">{y.get('basis', '')}</td>
-        </tr>
-        """
-
-    panchanga = result.get("panchanga", {})
-    doshas = result.get("doshas", {})
-
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <style>
-            @page {{ size:A4; margin:15mm; }}
-            body {{ font-family:Helvetica,Arial,sans-serif; color:#1e293b; font-size:11px; }}
-            .header {{ text-align:center; border-bottom:2px solid #b71c1c; padding-bottom:8px; margin-bottom:15px; }}
-            .title {{ font-size:20px; font-weight:bold; color:#b71c1c; margin:0; }}
-            .subtitle {{ font-size:10px; color:#64748b; margin-top:3px; }}
-            .info-box {{ background:#fffbeb; border:1px solid #fde68a; padding:10px; margin-bottom:15px; }}
-            .section-header {{ font-size:13px; font-weight:bold; color:#b71c1c; border-bottom:1px solid #fecaca; padding-bottom:3px; margin-top:15px; margin-bottom:8px; }}
-            table {{ width:100%; border-collapse:collapse; margin-bottom:12px; }}
-            th {{ background:#b71c1c; color:white; padding:6px; text-align:left; font-size:10px; }}
-            td {{ border-bottom:1px solid #e2e8f0; font-size:10px; }}
-            .card {{ background:#f8fafc; border:1px solid #e2e8f0; padding:10px; margin-top:8px; }}
-        </style>
-    </head>
-
-    <body>
-
-        <div class="header">
-            <h1 class="title">Pustak -Vedic Horoscope & Kundli Report</h1>
-           
-        </div>
-
-        <div class="info-box">
-            <table>
-                <tr>
-                    <td><strong>Name:</strong> {data.name}</td>
-                    <td><strong>Date:</strong> {data.date}</td>
-                    <td><strong>Time:</strong> {data.time}</td>
-                </tr>
-                <tr>
-                    <td><strong>Lagna:</strong> {result.get('lagna', {}).get('sign', '')}</td>
-                    <td><strong>Ayanamsha:</strong> {data.ayanamsha}</td>
-                    <td><strong>Timezone:</strong> UTC{data.tz_offset:+}</td>
-                </tr>
-            </table>
-        </div>
-
-        <div class="section-header">Planetary Positions</div>
-
-        <table>
-            <thead>
-                <tr>
-                    <th>Body</th>
-                    <th>Rashi</th>
-                    <th>Degree</th>
-                    <th>Nakshatra</th>
-                    <th>House</th>
-                    <th>D9</th>
-                    <th>Retro</th>
-                    <th>Combust</th>
-                </tr>
-            </thead>
-            <tbody>{planet_rows}</tbody>
-        </table>
-
-        <div class="section-header">Panchanga</div>
-
-        <table>
-            <tr>
-                <td><strong>Tithi:</strong> {panchanga.get('tithi', '')}</td>
-                <td><strong>Vara:</strong> {panchanga.get('vara', '')}</td>
-            </tr>
-            <tr>
-                <td><strong>Nakshatra:</strong> {panchanga.get('nakshatra', '')}</td>
-                <td><strong>Yoga:</strong> {panchanga.get('yoga', '')}</td>
-            </tr>
-            <tr>
-                <td><strong>Karana:</strong> {panchanga.get('karana', '')}</td>
-                <td><strong>Paksha:</strong> {panchanga.get('paksha', '')}</td>
-            </tr>
-        </table>
-
-        <div class="section-header">Vimshottari Mahadasha</div>
-
-        <table>
-            <thead>
-                <tr>
-                    <th>Lord</th>
-                    <th>Start</th>
-                    <th>End</th>
-                    <th>Duration</th>
-                </tr>
-            </thead>
-            <tbody>{dasha_rows}</tbody>
-        </table>
-
-        <div class="section-header">Detected Yogas</div>
-        <table>
-            <thead>
-                <tr><th>Yoga</th><th>Basis</th></tr>
-            </thead>
-            <tbody>{yoga_rows or '<tr><td colspan="2">No configured yoga rule matched.</td></tr>'}</tbody>
-        </table>
-
-        <div class="section-header">Dosha / Transit Indicators</div>
-
-        <div class="card">
-            <strong>Manglik:</strong> {doshas.get('manglik', {}).get('present', False)}<br/>
-            <strong>Kaal Sarp:</strong> {doshas.get('kaal_sarp', {}).get('present', False)}<br/>
-            <strong>Pitru Indicator:</strong> {doshas.get('pitru_indicator', {}).get('present', False)}<br/>
-            <strong>Sade Sati:</strong> {doshas.get('sade_sati', {}).get('present', False)}
-            {(' - ' + str(doshas.get('sade_sati', {}).get('phase'))) if doshas.get('sade_sati', {}).get('phase') else ''}<br/>
-            <strong>Dhaiya:</strong> {doshas.get('dhaiya', {}).get('present', False)}
-        </div>
-
-        {"<div class='section-header'>Daily Rashifal</div><div class='card'>" + result.get('rashifal', {}).get('overall', '') + "</div>" if result.get('rashifal') else ""}
-
-        <div class="section-header">Calculation Notes</div>
-        <div class="card">
-            {"<br/>".join(result.get("calculation_notes", []))}
-        </div>
-
-    </body>
-    </html>
-    """
-# =====================================================================
-# TRADITIONAL ODIA / EAST INDIAN RASHI CHAKRA FOR PDF
-# =====================================================================
-
-def build_odia_rashi_chakra_svg(
-    chart_name: str,
-    chart: dict,
-    font_family: str = "OdiaFont"
-) -> str:
-
-    houses = (
-        chart.get("houses", {})
-        or {}
-    )
-
-    # ---------------------------------------------------------
-    # ODIA DIGITS
-    # ---------------------------------------------------------
-
-    ODIA_DIGITS = {
-        1: "୧",
-        2: "୨",
-        3: "୩",
-        4: "୪",
-        5: "୫",
-        6: "୬",
-        7: "୭",
-        8: "୮",
-        9: "୯",
-        10: "୧୦",
-        11: "୧୧",
-        12: "୧୨",
-    }
-
-
-    # ---------------------------------------------------------
-    # ODIA PLANET SHORT NAMES
-    # ---------------------------------------------------------
-
-    ODIA_PLANETS = {
-
-        "Sun": "ର",
-        "Ravi": "ର",
-        "ସୂର୍ଯ୍ୟ": "ର",
-
-        "Moon": "ଚ",
-        "Chandra": "ଚ",
-        "ଚନ୍ଦ୍ର": "ଚ",
-
-        "Mars": "ମ",
-        "Mangala": "ମ",
-        "ମଙ୍ଗଳ": "ମ",
-
-        "Mercury": "ବୁ",
-        "Budha": "ବୁ",
-        "ବୁଧ": "ବୁ",
-
-        "Jupiter": "ଗୁ",
-        "Guru": "ଗୁ",
-        "ଗୁରୁ": "ଗୁ",
-
-        "Venus": "ଶୁ",
-        "Shukra": "ଶୁ",
-        "ଶୁକ୍ର": "ଶୁ",
-
-        "Saturn": "ଶ",
-        "Shani": "ଶ",
-        "ଶନି": "ଶ",
-
-        "Rahu": "ରା",
-        "ରାହୁ": "ରା",
-
-        "Ketu": "କେ",
-        "କେତୁ": "କେ",
-
-        "Lagna": "ଲ",
-        "Ascendant": "ଲ",
-        "ଲଗ୍ନ": "ଲ",
-    }
-
-
-    # ---------------------------------------------------------
-    # ENGLISH SIGN -> SIGN NUMBER
-    # ---------------------------------------------------------
-
-    SIGN_NUMBERS = {
-        "Aries": 1,
-        "Taurus": 2,
-        "Gemini": 3,
-        "Cancer": 4,
-        "Leo": 5,
-        "Virgo": 6,
-        "Libra": 7,
-        "Scorpio": 8,
-        "Sagittarius": 9,
-        "Capricorn": 10,
-        "Aquarius": 11,
-        "Pisces": 12,
-    }
-
-
-    def get_sign_number(house_data):
-
-        sign_en = (
-            house_data.get("sign_en")
-            or ""
-        )
-
-        if sign_en in SIGN_NUMBERS:
-            return SIGN_NUMBERS[sign_en]
-
-
-        # Fallback for localized sign text
-
-        sign = (
-            house_data.get("sign")
-            or ""
-        ).lower()
-
-
-        if (
-            "ari" in sign
-            or "mesh" in sign
-            or "ମେଷ" in sign
-        ):
-            return 1
-
-
-        if (
-            "tau" in sign
-            or "vri" in sign
-            or "ବୃଷ" in sign
-        ):
-            return 2
-
-
-        if (
-            "gem" in sign
-            or "mith" in sign
-            or "ମିଥୁନ" in sign
-        ):
-            return 3
-
-
-        if (
-            "can" in sign
-            or "kark" in sign
-            or "କର୍କ" in sign
-        ):
-            return 4
-
-
-        if (
-            "leo" in sign
-            or "simh" in sign
-            or "ସିଂହ" in sign
-        ):
-            return 5
-
-
-        if (
-            "vir" in sign
-            or "kany" in sign
-            or "କନ୍ୟା" in sign
-        ):
-            return 6
-
-
-        if (
-            "lib" in sign
-            or "tula" in sign
-            or "ତୁଳା" in sign
-        ):
-            return 7
-
-
-        if (
-            "sco" in sign
-            or "vris" in sign
-            or "ବିଛା" in sign
-        ):
-            return 8
-
-
-        if (
-            "sag" in sign
-            or "dhan" in sign
-            or "ଧନୁ" in sign
-        ):
-            return 9
-
-
-        if (
-            "cap" in sign
-            or "maka" in sign
-            or "ମକର" in sign
-        ):
-            return 10
-
-
-        if (
-            "aqu" in sign
-            or "kumb" in sign
-            or "କୁମ୍ଭ" in sign
-        ):
-            return 11
-
-
-        if (
-            "pis" in sign
-            or "meen" in sign
-            or "ମୀନ" in sign
-        ):
-            return 12
-
-
-        return 1
-
-
-    # ---------------------------------------------------------
-    # BUILD SIGN MAP
-    #
-    # Just like your React Native component:
-    #
-    # signMap[1] ... signMap[12]
-    # ---------------------------------------------------------
-
-    sign_map = {
-        i: []
-        for i in range(1, 13)
-    }
-
-
-    for house_no, house_data in houses.items():
-
-        sign_number = get_sign_number(
-            house_data
-        )
-
-
-        # House 1 = Lagna
-        if int(house_no) == 1:
-
-            sign_map[
-                sign_number
-            ].append(
-                "Lagna"
-            )
-
-
-        planets = (
-            house_data.get(
-                "planets",
-                []
-            )
-            or []
-        )
-
-
-        for planet in planets:
-
-            sign_map[
-                sign_number
-            ].append(
-                planet
-            )
-
-
-    # ---------------------------------------------------------
-    # SAME POSITIONS AS YOUR REACT NATIVE SVG
-    # ---------------------------------------------------------
-
-    positions = {
-
-        1: (180, 295),
-
-        2: (295, 315),
-
-        3: (315, 265),
-
-        4: (295, 180),
-
-        5: (315, 95),
-
-        6: (295, 45),
-
-        7: (180, 65),
-
-        8: (65, 45),
-
-        9: (45, 95),
-
-        10: (65, 180),
-
-        11: (45, 265),
-
-        12: (65, 320),
-    }
-
-
-    # ---------------------------------------------------------
-    # PLANET / SIGN TEXT SVG
-    # ---------------------------------------------------------
-
-    sign_text_svg = ""
-
-
-    for sign_number in range(
-        1,
-        13
-    ):
-
-        x, y = positions[
-            sign_number
-        ]
-
-
-        occupants = sign_map[
-            sign_number
-        ]
-
-
-        short_planets = []
-
-
-        for planet in occupants:
-
-            short_name = (
-                ODIA_PLANETS.get(
-                    planet
-                )
-            )
-
-
-            if not short_name:
-
-                # Small fallback
-                short_name = str(
-                    planet
-                )[:2]
-
-
-            short_planets.append(
-                short_name
-            )
-
-
-        planet_text = " ".join(
-            short_planets
-        )
-
-
-        full_text = (
-            f"{ODIA_DIGITS[sign_number]} "
-            f"{planet_text}"
-        ).strip()
-
-
-        sign_text_svg += f"""
-        <text
-            x="{x}"
-            y="{y}"
-            fill="#b71c1c"
-            font-family="{font_family}"
-            font-size="13"
-            text-anchor="middle"
-        >
-            {full_text}
-        </text>
-        """
-
-
-    # ---------------------------------------------------------
-    # LAGNA TEXT
-    # ---------------------------------------------------------
-
-    lagna_sign = (
-        chart.get("lagna_sign")
-        or
-        chart.get("lagna_sign_en")
-        or "-"
-    )
-
-
-    # ---------------------------------------------------------
-    # COMPLETE TRADITIONAL ODIA CHART
-    # ---------------------------------------------------------
-
-    return f"""
-    <div class="odia-chart-block">
-
-        <div class="odia-chart-heading">
-            {chart_name}
-        </div>
-
-        <div class="odia-chart-subheading">
-            ଲଗ୍ନ: {lagna_sign}
-        </div>
-
-
-        <svg
-            viewBox="0 0 360 360"
-            width="100%"
-            height="100%"
-            xmlns="http://www.w3.org/2000/svg"
-        >
-
-            <!-- Outer square -->
-
-            <rect
-                x="5"
-                y="5"
-                width="350"
-                height="350"
-                fill="none"
-                stroke="#b71c1c"
-                stroke-width="3"
-            />
-
-
-            <!-- Vertical lines -->
-
-            <line
-                x1="120"
-                y1="5"
-                x2="120"
-                y2="355"
-                stroke="#b71c1c"
-                stroke-width="2"
-            />
-
-            <line
-                x1="240"
-                y1="5"
-                x2="240"
-                y2="355"
-                stroke="#b71c1c"
-                stroke-width="2"
-            />
-
-
-            <!-- Horizontal lines -->
-
-            <line
-                x1="5"
-                y1="120"
-                x2="355"
-                y2="120"
-                stroke="#b71c1c"
-                stroke-width="2"
-            />
-
-            <line
-                x1="5"
-                y1="240"
-                x2="355"
-                y2="240"
-                stroke="#b71c1c"
-                stroke-width="2"
-            />
-
-
-            <!-- Traditional corner diagonals -->
-
-            <line
-                x1="5"
-                y1="5"
-                x2="120"
-                y2="120"
-                stroke="#b71c1c"
-                stroke-width="2"
-            />
-
-
-            <line
-                x1="355"
-                y1="5"
-                x2="240"
-                y2="120"
-                stroke="#b71c1c"
-                stroke-width="2"
-            />
-
-
-            <line
-                x1="120"
-                y1="240"
-                x2="5"
-                y2="355"
-                stroke="#b71c1c"
-                stroke-width="2"
-            />
-
-
-            <line
-                x1="240"
-                y1="240"
-                x2="355"
-                y2="355"
-                stroke="#b71c1c"
-                stroke-width="2"
-            />
-
-
-            <!-- Center title -->
-
-            <text
-                x="180"
-                y="170"
-                fill="#b71c1c"
-                font-family="{font_family}"
-                font-size="15"
-                text-anchor="middle"
-            >
-                ରାଶି ଚକ୍ର
-            </text>
-
-
-            <text
-                x="180"
-                y="195"
-                fill="#64748b"
-                font-family="{font_family}"
-                font-size="11"
-                text-anchor="middle"
-            >
-                {chart_name}
-            </text>
-
-
-            <!-- Rashi + Planet text -->
-
-            {sign_text_svg}
-
-        </svg>
-
-    </div>
-    """
-
-
-def build_pdf_html(
-    result: dict,
-    data: BirthDataRequest
-) -> str:
-
-    # =========================================================
-    # FONT
-    # =========================================================
-
-    pdf_font_name, pdf_font_path = get_pdf_font(
-        data.lang
-    )
+def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
+    pdf_font_name, pdf_font_path = get_pdf_font(data.lang)
 
     if not os.path.exists(pdf_font_path):
         raise Exception(
             f"PDF font not found: {pdf_font_path}"
         )
 
-    pdf_font_uri = (
-        Path(pdf_font_path)
-        .resolve()
-        .as_uri()
-    )
-
-
-    # =========================================================
-    # COMMON HELPERS
-    # =========================================================
+    pdf_font_uri = Path(
+        pdf_font_path
+    ).resolve().as_uri()
 
     def safe(value, default="-"):
-
-        if value is None:
-            return default
-
-        if value == "":
+        if value is None or value == "":
             return default
 
         return html.escape(
             str(value)
         )
 
-
-    def safe_join(
-        values,
-        default="-"
-    ):
-
+    def safe_join(values, default="-"):
         if not values:
             return default
 
@@ -1219,9 +724,7 @@ def build_pdf_html(
             for v in values
         )
 
-
     def yes_no(value):
-
         if data.lang == "or":
             return "ହଁ" if value else "ନା"
 
@@ -1230,537 +733,239 @@ def build_pdf_html(
 
         return "Yes" if value else "No"
 
+    # ---------------------------------------------------------
+    # Chart helpers
+    # ---------------------------------------------------------
 
-    # =========================================================
-    # ODIA CHART CONSTANTS
-    # =========================================================
-
-    ODIA_DIGITS = {
-        1: "୧",
-        2: "୨",
-        3: "୩",
-        4: "୪",
-        5: "୫",
-        6: "୬",
-        7: "୭",
-        8: "୮",
-        9: "୯",
-        10: "୧୦",
-        11: "୧୧",
-        12: "୧୨",
+    odia_digits = {
+        1: "୧", 2: "୨", 3: "୩", 4: "୪",
+        5: "୫", 6: "୬", 7: "୭", 8: "୮",
+        9: "୯", 10: "୧୦", 11: "୧୧", 12: "୧୨",
     }
 
-
-    ODIA_PLANETS = {
-
-        # English
+    odia_planets = {
         "Sun": "ର",
         "Ravi": "ର",
+        "ସୂର୍ଯ୍ୟ": "ର",
 
         "Moon": "ଚ",
         "Chandra": "ଚ",
+        "ଚନ୍ଦ୍ର": "ଚ",
 
         "Mars": "ମ",
         "Mangala": "ମ",
+        "ମଙ୍ଗଳ": "ମ",
 
         "Mercury": "ବୁ",
         "Budha": "ବୁ",
+        "ବୁଧ": "ବୁ",
 
         "Jupiter": "ଗୁ",
         "Guru": "ଗୁ",
+        "ଗୁରୁ": "ଗୁ",
 
         "Venus": "ଶୁ",
         "Shukra": "ଶୁ",
+        "ଶୁକ୍ର": "ଶୁ",
 
         "Saturn": "ଶ",
         "Shani": "ଶ",
+        "ଶନି": "ଶ",
 
         "Rahu": "ରା",
+        "ରାହୁ": "ରା",
+
         "Ketu": "କେ",
+        "କେତୁ": "କେ",
 
         "Lagna": "ଲ",
         "Ascendant": "ଲ",
-
-        # Odia
-        "ସୂର୍ଯ୍ୟ": "ର",
-        "ଚନ୍ଦ୍ର": "ଚ",
-        "ମଙ୍ଗଳ": "ମ",
-        "ବୁଧ": "ବୁ",
-        "ଗୁରୁ": "ଗୁ",
-        "ଶୁକ୍ର": "ଶୁ",
-        "ଶନି": "ଶ",
-        "ରାହୁ": "ରା",
-        "କେତୁ": "କେ",
         "ଲଗ୍ନ": "ଲ",
-
-        # Hindi fallback
-        "सूर्य": "ର",
-        "चंद्र": "ଚ",
-        "चन्द्र": "ଚ",
-        "मंगल": "ମ",
-        "बुध": "ବୁ",
-        "गुरु": "ଗୁ",
-        "बृहस्पति": "ଗୁ",
-        "शुक्र": "ଶୁ",
-        "शनि": "ଶ",
-        "राहु": "ରା",
-        "केतु": "କେ",
     }
 
+    def sign_number_from_house(house_data):
+        house_data = house_data or {}
 
-    SIGN_NUMBERS = {
-
-        "Aries": 1,
-        "Taurus": 2,
-        "Gemini": 3,
-        "Cancer": 4,
-        "Leo": 5,
-        "Virgo": 6,
-        "Libra": 7,
-        "Scorpio": 8,
-        "Sagittarius": 9,
-        "Capricorn": 10,
-        "Aquarius": 11,
-        "Pisces": 12,
-    }
-
-
-    # =========================================================
-    # SIGN NUMBER HELPER
-    # Same idea as getSignNumber() in React Native
-    # =========================================================
-
-    def get_sign_number(
-        house_data
-    ):
-
-        if not house_data:
-            return 1
-
-
-        sign_en = (
-            house_data.get(
-                "sign_en"
-            )
+        sign_en = str(
+            house_data.get("sign_en")
             or ""
         )
 
-
-        if sign_en in SIGN_NUMBERS:
-
-            return SIGN_NUMBERS[
-                sign_en
-            ]
-
+        if sign_en in KP_SIGN_NAMES:
+            return (
+                KP_SIGN_NAMES.index(
+                    sign_en
+                )
+                + 1
+            )
 
         sign = str(
-            house_data.get(
-                "sign"
-            )
+            house_data.get("sign")
             or ""
         ).lower()
 
+        tests = [
+            (1, ("ari", "mesh", "ମେଷ", "मेष")),
+            (2, ("tau", "vrish", "ବୃଷ", "वृष")),
+            (3, ("gem", "mith", "ମିଥୁନ", "मिथुन")),
+            (4, ("can", "kark", "କର୍କ", "कर्क")),
+            (5, ("leo", "simh", "ସିଂହ", "सिंह")),
+            (6, ("vir", "kany", "କନ୍ୟା", "कन्या")),
+            (7, ("lib", "tula", "ତୁଳା", "तुला")),
+            (8, ("sco", "vrisch", "ବୃଶ୍ଚିକ", "वृश्चिक")),
+            (9, ("sag", "dhan", "ଧନୁ", "धनु")),
+            (10, ("cap", "maka", "ମକର", "मकर")),
+            (11, ("aqu", "kumb", "କୁମ୍ଭ", "कुंभ")),
+            (12, ("pis", "meen", "ମୀନ", "मीन")),
+        ]
 
-        if (
-            "ari" in sign
-            or "mesh" in sign
-            or "ମେଷ" in sign
-            or "मेष" in sign
-        ):
-            return 1
-
-
-        if (
-            "tau" in sign
-            or "vrish" in sign
-            or "vri" in sign
-            or "ବୃଷ" in sign
-            or "वृष" in sign
-        ):
-            return 2
-
-
-        if (
-            "gem" in sign
-            or "mith" in sign
-            or "ମିଥୁନ" in sign
-            or "मिथुन" in sign
-        ):
-            return 3
-
-
-        if (
-            "can" in sign
-            or "kark" in sign
-            or "କର୍କ" in sign
-            or "कर्क" in sign
-        ):
-            return 4
-
-
-        if (
-            "leo" in sign
-            or "simh" in sign
-            or "ସିଂହ" in sign
-            or "सिंह" in sign
-        ):
-            return 5
-
-
-        if (
-            "vir" in sign
-            or "kany" in sign
-            or "କନ୍ୟା" in sign
-            or "कन्या" in sign
-        ):
-            return 6
-
-
-        if (
-            "lib" in sign
-            or "tula" in sign
-            or "ତୁଳା" in sign
-            or "तुला" in sign
-        ):
-            return 7
-
-
-        if (
-            "sco" in sign
-            or "vrisch" in sign
-            or "ବୃଶ୍ଚିକ" in sign
-            or "वृश्चिक" in sign
-        ):
-            return 8
-
-
-        if (
-            "sag" in sign
-            or "dhan" in sign
-            or "ଧନୁ" in sign
-            or "धनु" in sign
-        ):
-            return 9
-
-
-        if (
-            "cap" in sign
-            or "maka" in sign
-            or "ମକର" in sign
-            or "मकर" in sign
-        ):
-            return 10
-
-
-        if (
-            "aqu" in sign
-            or "kumb" in sign
-            or "କୁମ୍ଭ" in sign
-            or "कुंभ" in sign
-        ):
-            return 11
-
-
-        if (
-            "pis" in sign
-            or "meen" in sign
-            or "ମୀନ" in sign
-            or "मीन" in sign
-        ):
-            return 12
-
+        for sign_number, tokens in tests:
+            if any(
+                token in sign
+                for token in tokens
+            ):
+                return sign_number
 
         return 1
 
-
-    # =========================================================
-    # TRADITIONAL ODIA / EAST INDIAN CHART SVG
-    #
-    # This reproduces your React Native OdiaRashiChakraSVG:
-    #
-    # outer square
-    # vertical x=120 / 240
-    # horizontal y=120 / 240
-    # four corner diagonals
-    # Odia sign numbers
-    # Odia planet abbreviation
-    # =========================================================
-
-    def build_odia_chart(
-        chart_name,
-        chart
-    ):
-
-        chart = chart or {}
+    def chart_sign_map(chart):
+        sign_map = {
+            i: []
+            for i in range(1, 13)
+        }
 
         houses = (
-            chart.get(
+            (chart or {}).get(
                 "houses",
                 {}
             )
             or {}
         )
 
-
-        # -----------------------------------------------------
-        # Build sign map
-        # -----------------------------------------------------
-
-        sign_map = {
-            i: []
-            for i in range(
-                1,
-                13
+        for house_no, h in houses.items():
+            sign_no = sign_number_from_house(
+                h
             )
-        }
-
-
-        for (
-            house_no,
-            house_data
-        ) in houses.items():
-
-            sign_number = (
-                get_sign_number(
-                    house_data
-                )
-            )
-
 
             try:
-                house_int = int(
-                    house_no
-                )
+                if int(house_no) == 1:
+                    sign_map[
+                        sign_no
+                    ].append(
+                        "Lagna"
+                    )
             except Exception:
-                house_int = 0
+                pass
 
-
-            # House 1 = Lagna
-            if house_int == 1:
-
-                sign_map[
-                    sign_number
-                ].append(
-                    "Lagna"
-                )
-
-
-            planets = (
-                house_data.get(
+            for planet in (
+                h.get(
                     "planets",
                     []
                 )
                 or []
-            )
-
-
-            for planet in planets:
-
+            ):
                 sign_map[
-                    sign_number
+                    sign_no
                 ].append(
-                    planet
+                    str(planet)
                 )
 
+        return sign_map
 
-        # -----------------------------------------------------
-        # Exact same position map as RN chart
-        # -----------------------------------------------------
+    def odia_occupants(items):
+        converted = []
+
+        for planet in items:
+            planet_name = str(
+                planet
+            )
+
+            converted.append(
+                odia_planets.get(
+                    planet_name,
+                    planet_name[:2],
+                )
+            )
+
+        return " ".join(
+            converted
+        )
+
+    # ---------------------------------------------------------
+    # Traditional Odia / East Indian chart
+    # ---------------------------------------------------------
+
+    def build_odia_chart(
+        chart_name,
+        chart,
+    ):
+        sign_map = chart_sign_map(
+            chart
+        )
 
         positions = {
-
-            1: (
-                180,
-                295
-            ),
-
-            2: (
-                295,
-                315
-            ),
-
-            3: (
-                315,
-                265
-            ),
-
-            4: (
-                295,
-                180
-            ),
-
-            5: (
-                315,
-                95
-            ),
-
-            6: (
-                295,
-                45
-            ),
-
-            7: (
-                180,
-                65
-            ),
-
-            8: (
-                65,
-                45
-            ),
-
-            9: (
-                45,
-                95
-            ),
-
-            10: (
-                65,
-                180
-            ),
-
-            11: (
-                45,
-                265
-            ),
-
-            12: (
-                65,
-                320
-            ),
+            1: (180, 295),
+            2: (295, 315),
+            3: (315, 265),
+            4: (295, 180),
+            5: (315, 95),
+            6: (295, 45),
+            7: (180, 65),
+            8: (65, 45),
+            9: (45, 95),
+            10: (65, 180),
+            11: (45, 265),
+            12: (65, 320),
         }
 
+        sign_text = ""
 
-        # -----------------------------------------------------
-        # Generate all sign text
-        # -----------------------------------------------------
-
-        sign_text_svg = ""
-
-
-        for sign_number in range(
+        for sign_no in range(
             1,
             13
         ):
+            x, y = positions[
+                sign_no
+            ]
 
-            x, y = (
-                positions[
-                    sign_number
-                ]
-            )
-
-
-            occupants = (
-                sign_map[
-                    sign_number
-                ]
-            )
-
-
-            converted = []
-
-
-            for planet in occupants:
-
-                converted_name = (
-                    ODIA_PLANETS.get(
-                        str(
-                            planet
-                        )
-                    )
-                )
-
-
-                if not converted_name:
-
-                    p_text = str(
-                        planet
-                    )
-
-                    converted_name = (
-                        p_text[:2]
-                    )
-
-
-                converted.append(
-                    converted_name
-                )
-
-
-            planets_text = (
-                " ".join(
-                    converted
-                )
-            )
-
-
-            display_text = (
-                f"{ODIA_DIGITS[sign_number]} "
-                f"{planets_text}"
+            label = (
+                f"{odia_digits[sign_no]} "
+                f"{odia_occupants(sign_map[sign_no])}"
             ).strip()
 
-
-            sign_text_svg += f"""
+            sign_text += f'''
             <text
                 x="{x}"
                 y="{y}"
-                fill="#b71c1c"
+                fill="#0d7880"
                 font-family="{pdf_font_name}"
                 font-size="13"
                 text-anchor="middle"
             >
-                {safe(display_text)}
+                {safe(label)}
             </text>
-            """
+            '''
 
-
-        # -----------------------------------------------------
-        # Lagna
-        # -----------------------------------------------------
-
-        lagna_sign = (
-            chart.get(
+        lagna = safe(
+            (chart or {}).get(
                 "lagna_sign"
-            )
-            or
-            chart.get(
-                "lagna_sign_en"
             )
             or "-"
         )
 
+        return f'''
+        <div class="chart-block">
 
-        # -----------------------------------------------------
-        # Complete SVG
-        # -----------------------------------------------------
-
-        return f"""
-        <div class="odia-chart-block">
-
-            <div class="odia-chart-heading">
-
+            <div class="chart-title">
                 {safe(chart_name)}
-
+                · ଲଗ୍ନ: {lagna}
             </div>
-
-
-            <div class="odia-chart-lagna">
-
-                ଲଗ୍ନ:
-                {safe(lagna_sign)}
-
-            </div>
-
 
             <svg
-                class="odia-chart-svg"
                 viewBox="0 0 360 360"
+                class="chart-svg"
                 xmlns="http://www.w3.org/2000/svg"
             >
-
-                <!-- ========================================
-                     OUTER BORDER
-                ========================================= -->
 
                 <rect
                     x="5"
@@ -1768,111 +973,25 @@ def build_pdf_html(
                     width="350"
                     height="350"
                     fill="#ffffff"
-                    stroke="#b71c1c"
+                    stroke="#0d7880"
                     stroke-width="3"
                 />
 
+                <line x1="120" y1="5" x2="120" y2="355" stroke="#0d7880" stroke-width="2"/>
+                <line x1="240" y1="5" x2="240" y2="355" stroke="#0d7880" stroke-width="2"/>
 
-                <!-- ========================================
-                     VERTICAL LINES
-                ========================================= -->
+                <line x1="5" y1="120" x2="355" y2="120" stroke="#0d7880" stroke-width="2"/>
+                <line x1="5" y1="240" x2="355" y2="240" stroke="#0d7880" stroke-width="2"/>
 
-                <line
-                    x1="120"
-                    y1="5"
-                    x2="120"
-                    y2="355"
-                    stroke="#b71c1c"
-                    stroke-width="2"
-                />
-
-
-                <line
-                    x1="240"
-                    y1="5"
-                    x2="240"
-                    y2="355"
-                    stroke="#b71c1c"
-                    stroke-width="2"
-                />
-
-
-                <!-- ========================================
-                     HORIZONTAL LINES
-                ========================================= -->
-
-                <line
-                    x1="5"
-                    y1="120"
-                    x2="355"
-                    y2="120"
-                    stroke="#b71c1c"
-                    stroke-width="2"
-                />
-
-
-                <line
-                    x1="5"
-                    y1="240"
-                    x2="355"
-                    y2="240"
-                    stroke="#b71c1c"
-                    stroke-width="2"
-                />
-
-
-                <!-- ========================================
-                     CORNER DIAGONALS
-                ========================================= -->
-
-                <line
-                    x1="5"
-                    y1="5"
-                    x2="120"
-                    y2="120"
-                    stroke="#b71c1c"
-                    stroke-width="2"
-                />
-
-
-                <line
-                    x1="355"
-                    y1="5"
-                    x2="240"
-                    y2="120"
-                    stroke="#b71c1c"
-                    stroke-width="2"
-                />
-
-
-                <line
-                    x1="120"
-                    y1="240"
-                    x2="5"
-                    y2="355"
-                    stroke="#b71c1c"
-                    stroke-width="2"
-                />
-
-
-                <line
-                    x1="240"
-                    y1="240"
-                    x2="355"
-                    y2="355"
-                    stroke="#b71c1c"
-                    stroke-width="2"
-                />
-
-
-                <!-- ========================================
-                     CENTER TITLE
-                ========================================= -->
+                <line x1="5" y1="5" x2="120" y2="120" stroke="#0d7880" stroke-width="2"/>
+                <line x1="355" y1="5" x2="240" y2="120" stroke="#0d7880" stroke-width="2"/>
+                <line x1="120" y1="240" x2="5" y2="355" stroke="#0d7880" stroke-width="2"/>
+                <line x1="240" y1="240" x2="355" y2="355" stroke="#0d7880" stroke-width="2"/>
 
                 <text
                     x="180"
                     y="170"
-                    fill="#b71c1c"
+                    fill="#0d7880"
                     font-family="{pdf_font_name}"
                     font-size="15"
                     text-anchor="middle"
@@ -1880,34 +999,525 @@ def build_pdf_html(
                     ରାଶି ଚକ୍ର
                 </text>
 
-
                 <text
                     x="180"
                     y="195"
                     fill="#64748b"
                     font-family="{pdf_font_name}"
-                    font-size="11"
+                    font-size="10"
                     text-anchor="middle"
                 >
                     {safe(chart_name)}
                 </text>
 
-
-                <!-- ========================================
-                     SIGNS + PLANETS
-                ========================================= -->
-
-                {sign_text_svg}
+                {sign_text}
 
             </svg>
 
         </div>
-        """
+        '''
 
+    # ---------------------------------------------------------
+    # North Indian chart
+    # ---------------------------------------------------------
 
-    # =========================================================
-    # LAGNA DATA
-    # =========================================================
+    def build_north_chart(
+        chart_name,
+        chart,
+    ):
+        houses = (
+            (chart or {}).get(
+                "houses",
+                {}
+            )
+            or {}
+        )
+
+        positions = {
+            1: (200, 100),
+            2: (100, 50),
+            3: (50, 100),
+            4: (100, 200),
+            5: (50, 300),
+            6: (100, 350),
+            7: (200, 300),
+            8: (300, 350),
+            9: (350, 300),
+            10: (300, 200),
+            11: (350, 100),
+            12: (300, 50),
+        }
+
+        labels = ""
+
+        for house_no in range(
+            1,
+            13
+        ):
+            h = (
+                houses.get(
+                    str(house_no)
+                )
+                or
+                houses.get(
+                    house_no
+                )
+                or {}
+            )
+
+            sign = safe(
+                h.get("sign")
+                or
+                h.get("sign_en")
+                or house_no
+            )
+
+            planets = safe_join(
+                h.get(
+                    "planets"
+                )
+                or []
+            )
+
+            x, y = positions[
+                house_no
+            ]
+
+            labels += f'''
+            <text
+                x="{x}"
+                y="{y - 9}"
+                fill="#0d7880"
+                font-family="{pdf_font_name}"
+                font-size="10"
+                text-anchor="middle"
+            >
+                {sign}
+            </text>
+
+            <text
+                x="{x}"
+                y="{y + 10}"
+                fill="#1e293b"
+                font-family="{pdf_font_name}"
+                font-size="8"
+                text-anchor="middle"
+            >
+                {planets}
+            </text>
+            '''
+
+        return f'''
+        <div class="chart-block">
+
+            <div class="chart-title">
+                {safe(chart_name)}
+                · North Indian
+            </div>
+
+            <svg
+                viewBox="0 0 400 400"
+                class="chart-svg"
+                xmlns="http://www.w3.org/2000/svg"
+            >
+
+                <rect
+                    x="10"
+                    y="10"
+                    width="380"
+                    height="380"
+                    fill="#ffffff"
+                    stroke="#0d7880"
+                    stroke-width="2"
+                />
+
+                <line x1="10" y1="10" x2="390" y2="390" stroke="#0d7880" stroke-width="1.5"/>
+                <line x1="390" y1="10" x2="10" y2="390" stroke="#0d7880" stroke-width="1.5"/>
+
+                <polygon
+                    points="200,10 390,200 200,390 10,200"
+                    fill="none"
+                    stroke="#0d7880"
+                    stroke-width="1.5"
+                />
+
+                {labels}
+
+            </svg>
+
+        </div>
+        '''
+
+    # ---------------------------------------------------------
+    # South Indian chart as SVG (PDF-safe)
+    # ---------------------------------------------------------
+
+    def build_south_chart(
+        chart_name,
+        chart,
+    ):
+        houses = (
+            (chart or {}).get(
+                "houses",
+                {}
+            )
+            or {}
+        )
+
+        sign_to_data = {}
+
+        for h in houses.values():
+            sign_to_data[
+                sign_number_from_house(
+                    h
+                )
+            ] = h
+
+        # positions are 4x4 fixed-sign cells
+        cells = {
+            12: (0, 0),
+            1: (1, 0),
+            2: (2, 0),
+            3: (3, 0),
+            11: (0, 1),
+            4: (3, 1),
+            10: (0, 2),
+            5: (3, 2),
+            9: (0, 3),
+            8: (1, 3),
+            7: (2, 3),
+            6: (3, 3),
+        }
+
+        cell_svg = ""
+
+        for sign_no, (
+            col,
+            row
+        ) in cells.items():
+
+            x = col * 100
+            y = row * 100
+
+            h = sign_to_data.get(
+                sign_no,
+                {}
+            )
+
+            sign = safe(
+                h.get("sign")
+                or
+                h.get("sign_en")
+                or
+                KP_SIGN_NAMES[
+                    sign_no - 1
+                ]
+            )
+
+            planets = safe_join(
+                h.get(
+                    "planets"
+                )
+                or []
+            )
+
+            cell_svg += f'''
+            <rect
+                x="{x}"
+                y="{y}"
+                width="100"
+                height="100"
+                fill="#ffffff"
+                stroke="#cbd5e1"
+                stroke-width="1"
+            />
+
+            <text
+                x="{x + 8}"
+                y="{y + 18}"
+                fill="#0d7880"
+                font-family="{pdf_font_name}"
+                font-size="10"
+            >
+                {sign}
+            </text>
+
+            <text
+                x="{x + 8}"
+                y="{y + 82}"
+                fill="#1e293b"
+                font-family="{pdf_font_name}"
+                font-size="8"
+            >
+                {planets}
+            </text>
+            '''
+
+        return f'''
+        <div class="chart-block">
+
+            <div class="chart-title">
+                {safe(chart_name)}
+                · South Indian
+            </div>
+
+            <svg
+                viewBox="0 0 400 400"
+                class="chart-svg"
+                xmlns="http://www.w3.org/2000/svg"
+            >
+
+                <rect
+                    x="0"
+                    y="0"
+                    width="400"
+                    height="400"
+                    fill="#ffffff"
+                    stroke="#0d7880"
+                    stroke-width="3"
+                />
+
+                {cell_svg}
+
+                <rect
+                    x="100"
+                    y="100"
+                    width="200"
+                    height="200"
+                    fill="#f8fafc"
+                    stroke="#cbd5e1"
+                    stroke-width="1"
+                />
+
+                <text
+                    x="200"
+                    y="190"
+                    fill="#0d7880"
+                    font-family="{pdf_font_name}"
+                    font-size="14"
+                    text-anchor="middle"
+                >
+                    {safe(chart_name)}
+                </text>
+
+                <text
+                    x="200"
+                    y="212"
+                    fill="#64748b"
+                    font-family="{pdf_font_name}"
+                    font-size="10"
+                    text-anchor="middle"
+                >
+                    South Indian
+                </text>
+
+            </svg>
+
+        </div>
+        '''
+
+    # ---------------------------------------------------------
+    # Circular / round chart
+    # ---------------------------------------------------------
+
+    def build_round_chart(
+        chart_name,
+        chart,
+    ):
+        sign_map = chart_sign_map(
+            chart
+        )
+
+        cx = 200.0
+        cy = 200.0
+        radius = 180.0
+
+        radial_lines = ""
+        labels = ""
+
+        for index in range(
+            12
+        ):
+            angle = math.radians(
+                index * 30
+                - 90
+            )
+
+            x = (
+                cx
+                + radius
+                * math.cos(
+                    angle
+                )
+            )
+
+            y = (
+                cy
+                + radius
+                * math.sin(
+                    angle
+                )
+            )
+
+            radial_lines += f'''
+            <line
+                x1="{cx}"
+                y1="{cy}"
+                x2="{x:.2f}"
+                y2="{y:.2f}"
+                stroke="#0d7880"
+                stroke-width="1.3"
+            />
+            '''
+
+            middle_angle = math.radians(
+                index * 30
+                - 75
+            )
+
+            tx = (
+                cx
+                + 128
+                * math.cos(
+                    middle_angle
+                )
+            )
+
+            ty = (
+                cy
+                + 128
+                * math.sin(
+                    middle_angle
+                )
+            )
+
+            sign_no = (
+                index + 1
+            )
+
+            label = (
+                f"{odia_digits[sign_no]} "
+                f"{odia_occupants(sign_map[sign_no])}"
+            ).strip()
+
+            labels += f'''
+            <text
+                x="{tx:.2f}"
+                y="{ty:.2f}"
+                fill="#0d7880"
+                font-family="{pdf_font_name}"
+                font-size="10"
+                text-anchor="middle"
+            >
+                {safe(label)}
+            </text>
+            '''
+
+        return f'''
+        <div class="chart-block">
+
+            <div class="chart-title">
+                {safe(chart_name)}
+                · Circular
+            </div>
+
+            <svg
+                viewBox="0 0 400 400"
+                class="chart-svg"
+                xmlns="http://www.w3.org/2000/svg"
+            >
+
+                <circle
+                    cx="200"
+                    cy="200"
+                    r="180"
+                    fill="#ffffff"
+                    stroke="#0d7880"
+                    stroke-width="2.5"
+                />
+
+                {radial_lines}
+
+                <circle
+                    cx="200"
+                    cy="200"
+                    r="72"
+                    fill="#fffbea"
+                    stroke="#0d7880"
+                    stroke-width="1.5"
+                />
+
+                <text
+                    x="200"
+                    y="195"
+                    fill="#0d7880"
+                    font-family="{pdf_font_name}"
+                    font-size="15"
+                    text-anchor="middle"
+                >
+                    ରାଶି ଚକ୍ର
+                </text>
+
+                <text
+                    x="200"
+                    y="214"
+                    fill="#64748b"
+                    font-family="{pdf_font_name}"
+                    font-size="9"
+                    text-anchor="middle"
+                >
+                    {safe(chart_name)}
+                </text>
+
+                {labels}
+
+            </svg>
+
+        </div>
+        '''
+
+    def render_chart(
+        chart_name,
+        chart,
+    ):
+        chart_style = str(
+            getattr(
+                data,
+                "chart_style",
+                "ODIA",
+            )
+            or "ODIA"
+        ).upper()
+
+        if chart_style == "NORTH":
+            return build_north_chart(
+                chart_name,
+                chart,
+            )
+
+        if chart_style == "SOUTH":
+            return build_south_chart(
+                chart_name,
+                chart,
+            )
+
+        if chart_style in (
+            "ROUND",
+            "CIRCULAR",
+        ):
+            return build_round_chart(
+                chart_name,
+                chart,
+            )
+
+        return build_odia_chart(
+            chart_name,
+            chart,
+        )
+
+    # ---------------------------------------------------------
+    # Core result sections
+    # ---------------------------------------------------------
 
     lagna = (
         result.get(
@@ -1917,99 +1527,13 @@ def build_pdf_html(
         or {}
     )
 
-
-    # =========================================================
-    # PLANETS
-    # =========================================================
-
-    planet_rows = ""
-
-
-    for (
-        planet_name,
-        planet
-    ) in (
+    planets = (
         result.get(
             "planets",
             {}
         )
         or {}
-    ).items():
-
-        status = []
-
-
-        if planet.get(
-            "is_retrograde"
-        ):
-
-            status.append(
-                "Retrograde"
-            )
-
-
-        if planet.get(
-            "is_combust"
-        ):
-
-            status.append(
-                "Combust"
-            )
-
-
-        if not status:
-
-            status.append(
-                "Direct"
-            )
-
-
-        planet_rows += f"""
-        <tr>
-
-            <td class="strong">
-                {safe(planet_name)}
-            </td>
-
-            <td>
-                {safe(planet.get('sign'))}
-            </td>
-
-            <td>
-                {safe(planet.get('degree'))}
-            </td>
-
-            <td>
-                {safe(planet.get('nakshatra'))}
-            </td>
-
-            <td>
-                {safe(planet.get('pada'))}
-            </td>
-
-            <td>
-                {safe(planet.get('house'))}
-            </td>
-
-            <td>
-                {safe(planet.get('navamsa_sign'))}
-            </td>
-
-            <td>
-                {safe(planet.get('dignity'))}
-            </td>
-
-            <td>
-                {safe_join(status)}
-            </td>
-
-        </tr>
-        """
-
-
-    # =========================================================
-    # HOUSES
-    # =========================================================
+    )
 
     house_lords = (
         result.get(
@@ -2019,90 +1543,6 @@ def build_pdf_html(
         or {}
     )
 
-
-    house_rows = ""
-
-
-    for (
-        house_no,
-        house_data
-    ) in (
-        result.get(
-            "houses",
-            {}
-        )
-        or {}
-    ).items():
-
-        planets = (
-            house_data.get(
-                "planets",
-                []
-            )
-            or []
-        )
-
-
-        lord_info = (
-
-            house_lords.get(
-                house_no
-            )
-
-            or
-
-            house_lords.get(
-                str(
-                    house_no
-                )
-            )
-
-            or {}
-        )
-
-
-        lord = (
-            house_data.get(
-                "lord"
-            )
-            or
-            lord_info.get(
-                "lord"
-            )
-        )
-
-
-        house_rows += f"""
-        <tr>
-
-            <td>
-                {safe(house_no)}
-            </td>
-
-            <td>
-                {safe(house_data.get('sign'))}
-            </td>
-
-            <td>
-                {safe(lord)}
-            </td>
-
-            <td>
-                {safe(lord_info.get('lord_house'))}
-            </td>
-
-            <td>
-                {safe_join(planets)}
-            </td>
-
-        </tr>
-        """
-
-
-    # =========================================================
-    # PANCHANGA
-    # =========================================================
-
     panchanga = (
         result.get(
             "panchanga",
@@ -2110,11 +1550,6 @@ def build_pdf_html(
         )
         or {}
     )
-
-
-    # =========================================================
-    # VIMSHOTTARI
-    # =========================================================
 
     vimshottari = (
         result.get(
@@ -2124,14 +1559,12 @@ def build_pdf_html(
         or {}
     )
 
-
     current_md = (
         vimshottari.get(
             "current_mahadasha"
         )
         or {}
     )
-
 
     current_ad = (
         vimshottari.get(
@@ -2140,7 +1573,6 @@ def build_pdf_html(
         or {}
     )
 
-
     current_pd = (
         vimshottari.get(
             "current_pratyantardasha"
@@ -2148,226 +1580,201 @@ def build_pdf_html(
         or {}
     )
 
+    kp = (
+        result.get(
+            "kp"
+        )
+        or
+        calculate_kp_details(
+            result,
+            data,
+        )
+    )
 
-    # =========================================================
-    # MAHADASHA TIMELINE
-    # =========================================================
+    planet_rows = ""
+
+    for planet_name, p in planets.items():
+        statuses = []
+
+        if p.get(
+            "is_retrograde"
+        ):
+            statuses.append(
+                "Retrograde"
+            )
+
+        if p.get(
+            "is_combust"
+        ):
+            statuses.append(
+                "Combust"
+            )
+
+        if not statuses:
+            statuses.append(
+                "Direct"
+            )
+
+        planet_rows += f'''
+        <tr>
+            <td class="strong">{safe(planet_name)}</td>
+            <td>{safe(p.get("sign"))}</td>
+            <td>{safe(p.get("degree"))}</td>
+            <td>{safe(p.get("nakshatra"))}</td>
+            <td>{safe(p.get("pada"))}</td>
+            <td>{safe(p.get("house"))}</td>
+            <td>{safe(p.get("navamsa_sign"))}</td>
+            <td>{safe(p.get("dignity"))}</td>
+            <td>{safe_join(statuses)}</td>
+        </tr>
+        '''
+
+    house_rows = ""
+
+    for house_no, h in (
+        result.get(
+            "houses",
+            {}
+        )
+        or {}
+    ).items():
+
+        lord_info = (
+            house_lords.get(
+                str(house_no)
+            )
+            or
+            house_lords.get(
+                house_no
+            )
+            or {}
+        )
+
+        house_rows += f'''
+        <tr>
+            <td>{safe(house_no)}</td>
+            <td>{safe(h.get("sign"))}</td>
+            <td>{safe(h.get("lord") or lord_info.get("lord"))}</td>
+            <td>{safe(lord_info.get("lord_house"))}</td>
+            <td>{safe_join(h.get("planets") or [])}</td>
+        </tr>
+        '''
 
     dasha_rows = ""
 
-
-    for dasha in (
+    for d in (
         result.get(
             "dasha",
             []
         )
         or []
     ):
+        dasha_rows += f'''
+        <tr>
+            <td>{safe(d.get("lord"))}</td>
+            <td>{safe(d.get("start_date"))}</td>
+            <td>{safe(d.get("end_date"))}</td>
+            <td>{safe(d.get("duration"))}</td>
+            <td>{"CURRENT" if d.get("is_active") else ""}</td>
+        </tr>
+        '''
 
-        active = (
-            "CURRENT"
-            if dasha.get(
-                "is_active"
+    yoga_rows = "".join(
+        f'''
+        <tr>
+            <td>{safe(y.get("name"))}</td>
+            <td>{safe(y.get("basis"))}</td>
+        </tr>
+        '''
+        for y in (
+            result.get(
+                "yogas",
+                []
             )
-            else ""
+            or []
         )
-
-
-        dasha_rows += f"""
-        <tr>
-
-            <td>
-                {safe(dasha.get('lord'))}
-            </td>
-
-            <td>
-                {safe(dasha.get('start_date'))}
-            </td>
-
-            <td>
-                {safe(dasha.get('end_date'))}
-            </td>
-
-            <td>
-                {safe(dasha.get('duration'))}
-            </td>
-
-            <td>
-                {safe(active)}
-            </td>
-
-        </tr>
-        """
-
-
-    # =========================================================
-    # YOGAS
-    # =========================================================
-
-    yoga_rows = ""
-
-
-    for yoga in (
-        result.get(
-            "yogas",
-            []
-        )
-        or []
-    ):
-
-        yoga_rows += f"""
-        <tr>
-
-            <td class="strong">
-                {safe(yoga.get('name'))}
-            </td>
-
-            <td>
-                {safe(yoga.get('basis'))}
-            </td>
-
-        </tr>
-        """
-
+    )
 
     if not yoga_rows:
-
-        yoga_rows = """
+        yoga_rows = '''
         <tr>
-
             <td colspan="2">
                 No configured Yoga rule matched.
             </td>
-
         </tr>
-        """
-
-
-    # =========================================================
-    # DOSHAS
-    # =========================================================
-
-    doshas = (
-        result.get(
-            "doshas",
-            {}
-        )
-        or {}
-    )
-
-
-    dosha_definitions = [
-
-        (
-            "manglik",
-            "Manglik Dosha"
-        ),
-
-        (
-            "kaal_sarp",
-            "Kaal Sarp"
-        ),
-
-        (
-            "pitru_indicator",
-            "Pitru Dosha Indicator"
-        ),
-
-        (
-            "sade_sati",
-            "Sade Sati"
-        ),
-
-        (
-            "dhaiya",
-            "Saturn Dhaiya"
-        ),
-    ]
-
+        '''
 
     dosha_rows = ""
 
-
-    for (
-        dosha_key,
-        dosha_name
-    ) in dosha_definitions:
+    for key, title in [
+        (
+            "manglik",
+            "Manglik Dosha",
+        ),
+        (
+            "kaal_sarp",
+            "Kaal Sarp",
+        ),
+        (
+            "pitru_indicator",
+            "Pitru Dosha",
+        ),
+        (
+            "sade_sati",
+            "Sade Sati",
+        ),
+        (
+            "dhaiya",
+            "Saturn Dhaiya",
+        ),
+    ]:
 
         item = (
-            doshas.get(
-                dosha_key
+            (
+                result.get(
+                    "doshas",
+                    {}
+                )
+                or {}
+            ).get(
+                key
             )
             or {}
         )
 
-
         details = []
 
+        for field, label in [
+            (
+                "mars_house",
+                "Mars House",
+            ),
+            (
+                "phase",
+                "Phase",
+            ),
+            (
+                "saturn_sign",
+                "Saturn Sign",
+            ),
+            (
+                "saturn_from_moon_house",
+                "Saturn from Moon",
+            ),
+        ]:
 
-        if item.get(
-            "mars_house"
-        ):
+            if item.get(
+                field
+            ) is not None:
 
-            details.append(
-                "Mars House: "
-                +
-                safe(
-                    item.get(
-                        "mars_house"
-                    )
+                details.append(
+                    f"{label}: "
+                    f"{safe(item.get(field))}"
                 )
-            )
-
-
-        if item.get(
-            "phase"
-        ):
-
-            details.append(
-                "Phase: "
-                +
-                safe(
-                    item.get(
-                        "phase"
-                    )
-                )
-            )
-
-
-        if item.get(
-            "saturn_sign"
-        ):
-
-            details.append(
-                "Saturn Sign: "
-                +
-                safe(
-                    item.get(
-                        "saturn_sign"
-                    )
-                )
-            )
-
-
-        if item.get(
-            "saturn_from_moon_house"
-        ):
-
-            details.append(
-                "Saturn from Moon: "
-                +
-                safe(
-                    item.get(
-                        "saturn_from_moon_house"
-                    )
-                )
-            )
-
 
         if item.get(
             "basis"
         ):
-
             details.append(
                 safe(
                     item.get(
@@ -2376,11 +1783,9 @@ def build_pdf_html(
                 )
             )
 
-
         if item.get(
             "rule"
         ):
-
             details.append(
                 safe(
                     item.get(
@@ -2389,41 +1794,25 @@ def build_pdf_html(
                 )
             )
 
-
-        dosha_rows += f"""
+        dosha_rows += f'''
         <tr>
-
-            <td class="strong">
-                {safe(dosha_name)}
-            </td>
-
+            <td>{safe(title)}</td>
             <td>
                 {
                     "Present"
-                    if item.get(
-                        "present"
-                    )
+                    if item.get("present")
                     else "Not Present"
                 }
             </td>
-
             <td>
                 {
-                    "<br/>".join(
-                        details
-                    )
+                    "<br/>".join(details)
                     if details
                     else "-"
                 }
             </td>
-
         </tr>
-        """
-
-
-    # =========================================================
-    # PLANET STRENGTH
-    # =========================================================
+        '''
 
     strength = (
         result.get(
@@ -2433,14 +1822,9 @@ def build_pdf_html(
         or {}
     )
 
-
     strength_rows = ""
 
-
-    for (
-        planet_name,
-        item
-    ) in (
+    for planet_name, item in (
         strength.get(
             "planets",
             {}
@@ -2448,48 +1832,20 @@ def build_pdf_html(
         or {}
     ).items():
 
-        strength_rows += f"""
+        strength_rows += f'''
         <tr>
-
-            <td class="strong">
-                {safe(planet_name)}
-            </td>
-
-            <td>
-                {safe(item.get('score'))}/100
-            </td>
-
-            <td>
-                {safe(item.get('label'))}
-            </td>
-
-            <td>
-                {safe(item.get('dignity'))}
-            </td>
-
-            <td>
-                {yes_no(item.get('retrograde'))}
-            </td>
-
-            <td>
-                {yes_no(item.get('combust'))}
-            </td>
-
+            <td>{safe(planet_name)}</td>
+            <td>{safe(item.get("score"))}/100</td>
+            <td>{safe(item.get("label"))}</td>
+            <td>{safe(item.get("dignity"))}</td>
+            <td>{yes_no(item.get("retrograde"))}</td>
+            <td>{yes_no(item.get("combust"))}</td>
         </tr>
-        """
-
-
-    # =========================================================
-    # TRANSITS
-    # =========================================================
+        '''
 
     transit_rows = ""
 
-
-    for (
-        planet_name,
-        transit
-    ) in (
+    for planet_name, transit in (
         result.get(
             "transits",
             {}
@@ -2497,70 +1853,151 @@ def build_pdf_html(
         or {}
     ).items():
 
-        longitude = (
-            transit.get(
-                "longitude_raw"
-            )
-        )
-
-
         try:
-
             longitude_text = (
-                f"{float(longitude):.4f}°"
+                f'{float(transit.get("longitude_raw")):.4f}°'
             )
-
         except Exception:
-
-            longitude_text = (
-                safe(
-                    longitude
+            longitude_text = safe(
+                transit.get(
+                    "longitude_raw"
                 )
             )
 
-
-        transit_rows += f"""
+        transit_rows += f'''
         <tr>
-
-            <td class="strong">
-                {safe(planet_name)}
-            </td>
-
-            <td>
-                {
-                    safe(
-                        transit.get(
-                            "sign"
-                        )
-                        or
-                        transit.get(
-                            "sign_en"
-                        )
-                    )
-                }
-            </td>
-
-            <td>
-                {longitude_text}
-            </td>
-
+            <td>{safe(planet_name)}</td>
+            <td>{safe(transit.get("sign") or transit.get("sign_en"))}</td>
+            <td>{longitude_text}</td>
             <td>
                 {
                     "Retrograde"
-                    if transit.get(
-                        "is_retrograde"
-                    )
+                    if transit.get("is_retrograde")
                     else "Direct"
                 }
             </td>
-
         </tr>
-        """
+        '''
 
+    # ---------------------------------------------------------
+    # KP tables
+    # ---------------------------------------------------------
 
-    # =========================================================
-    # TRADITIONAL ODIA VARGA CHARTS
-    # =========================================================
+    kp_planet_rows = ""
+
+    for planet_name, p in (
+        kp.get(
+            "planets",
+            {}
+        )
+        or {}
+    ).items():
+
+        try:
+            position = (
+                f'{safe(p.get("sign"))} '
+                f'{float(p.get("degree_in_sign", 0)):.4f}°'
+            )
+        except Exception:
+            position = safe(
+                p.get(
+                    "sign"
+                )
+            )
+
+        kp_planet_rows += f'''
+        <tr>
+            <td>{safe(planet_name)}</td>
+            <td>{position}</td>
+            <td>{safe(p.get("star_lord"))}</td>
+            <td>{safe(p.get("sub_lord"))}</td>
+            <td>{safe(p.get("sub_sub_lord"))}</td>
+        </tr>
+        '''
+
+    if not kp_planet_rows:
+        kp_planet_rows = '''
+        <tr>
+            <td colspan="5">
+                KP planet longitude data unavailable.
+            </td>
+        </tr>
+        '''
+
+    kp_cusp_rows = ""
+
+    for cusp_no, cusp in (
+        kp.get(
+            "cusps",
+            {}
+        )
+        or {}
+    ).items():
+
+        try:
+            position = (
+                f'{safe(cusp.get("sign"))} '
+                f'{float(cusp.get("degree_in_sign", 0)):.4f}°'
+            )
+        except Exception:
+            position = safe(
+                cusp.get(
+                    "sign"
+                )
+            )
+
+        kp_cusp_rows += f'''
+        <tr>
+            <td>{safe(cusp_no)}</td>
+            <td>{position}</td>
+            <td>{safe(cusp.get("sign_lord"))}</td>
+            <td>{safe(cusp.get("star_lord"))}</td>
+            <td>{safe(cusp.get("sub_lord"))}</td>
+            <td>{safe(cusp.get("sub_sub_lord"))}</td>
+        </tr>
+        '''
+
+    if not kp_cusp_rows:
+        kp_cusp_rows = '''
+        <tr>
+            <td colspan="6">
+                KP cusp data unavailable.
+            </td>
+        </tr>
+        '''
+
+    ruling_planets = (
+        kp.get(
+            "ruling_planets",
+            {}
+        )
+        or {}
+    )
+
+    ruling_html = "".join(
+        f'''
+        <span class="chip">
+            <b>
+                {
+                    safe(
+                        key.replace(
+                            "_",
+                            " ",
+                        ).title()
+                    )
+                }:
+            </b>
+            {safe(value)}
+        </span>
+        '''
+        for key, value in (
+            ruling_planets.items()
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Varga charts
+    # ---------------------------------------------------------
 
     charts = (
         result.get(
@@ -2570,251 +2007,116 @@ def build_pdf_html(
         or {}
     )
 
-
     varga_order = [
-
         "D1",
-
         "D2",
-
         "D3",
-
         "D4",
-
         "D7",
-
         "D9",
-
         "D10",
-
         "D12",
-
         "D16",
-
         "D20",
-
         "D24",
-
         "D27",
-
         "D30",
-
         "D40",
-
         "D45",
-
         "D60",
     ]
 
-
     varga_names = {
-
-        "D1":
-            "Rashi",
-
-        "D2":
-            "Hora",
-
-        "D3":
-            "Drekkana",
-
-        "D4":
-            "Chaturthamsha",
-
-        "D7":
-            "Saptamsha",
-
-        "D9":
-            "Navamsa",
-
-        "D10":
-            "Dashamsha",
-
-        "D12":
-            "Dwadasamsha",
-
-        "D16":
-            "Shodasamsha",
-
-        "D20":
-            "Vimsamsha",
-
-        "D24":
-            "Chaturvimsamsha",
-
-        "D27":
-            "Bhamsa",
-
-        "D30":
-            "Trimsamsha",
-
-        "D40":
-            "Khavedamsha",
-
-        "D45":
-            "Akshavedamsha",
-
-        "D60":
-            "Shashtiamsha",
+        "D1": "Rashi",
+        "D2": "Hora",
+        "D3": "Drekkana",
+        "D4": "Chaturthamsha",
+        "D7": "Saptamsha",
+        "D9": "Navamsa",
+        "D10": "Dashamsha",
+        "D12": "Dwadasamsha",
+        "D16": "Shodasamsha",
+        "D20": "Vimsamsha",
+        "D24": "Chaturvimsamsha",
+        "D27": "Bhamsa",
+        "D30": "Trimsamsha",
+        "D40": "Khavedamsha",
+        "D45": "Akshavedamsha",
+        "D60": "Shashtiamsha",
     }
-
 
     chart_blocks = []
 
-
     for chart_key in varga_order:
-
-        chart_data = (
-            charts.get(
-                chart_key
-            )
+        chart = charts.get(
+            chart_key
         )
-
-
-        if not chart_data:
-
-            # D1 fallback
-            if (
-                chart_key == "D1"
-                and
-                result.get(
-                    "houses"
-                )
-            ):
-
-                chart_data = {
-
-                    "houses":
-                        result.get(
-                            "houses",
-                            {}
-                        ),
-
-                    "lagna_sign":
-                        lagna.get(
-                            "sign"
-                        ),
-
-                }
-
-
-            # D9 fallback
-            elif (
-                chart_key == "D9"
-                and
-                result.get(
-                    "navamsa_houses"
-                )
-            ):
-
-                chart_data = {
-
-                    "houses":
-                        result.get(
-                            "navamsa_houses",
-                            {}
-                        ),
-
-                    "lagna_sign":
-                        lagna.get(
-                            "navamsa_sign"
-                        ),
-
-                }
-
-
-        if not chart_data:
-            continue
-
-
-        chart_title = (
-            f"{chart_key} - "
-            f"{varga_names.get(chart_key, '')}"
-        )
-
-
-        chart_blocks.append(
-
-            build_odia_chart(
-                chart_title,
-                chart_data
-            )
-        )
-
-
-    # =========================================================
-    # TWO ODIA CHARTS PER ROW
-    # =========================================================
-
-    varga_html = """
-    <table class="varga-layout">
-    <tbody>
-    """
-
-
-    for index in range(
-        0,
-        len(
-            chart_blocks
-        ),
-        2
-    ):
-
-        left_chart = (
-            chart_blocks[
-                index
-            ]
-        )
-
 
         if (
-            index + 1
-            <
-            len(
-                chart_blocks
+            not chart
+            and
+            chart_key == "D1"
+            and
+            result.get("houses")
+        ):
+            chart = {
+                "houses":
+                    result.get(
+                        "houses",
+                        {}
+                    ),
+                "lagna_sign":
+                    lagna.get(
+                        "sign"
+                    ),
+            }
+
+        if (
+            not chart
+            and
+            chart_key == "D9"
+            and
+            result.get(
+                "navamsa_houses"
             )
         ):
+            chart = {
+                "houses":
+                    result.get(
+                        "navamsa_houses",
+                        {}
+                    ),
+                "lagna_sign":
+                    lagna.get(
+                        "navamsa_sign"
+                    ),
+            }
 
-            right_chart = (
-                chart_blocks[
-                    index + 1
-                ]
+        if chart:
+            chart_blocks.append(
+                render_chart(
+                    (
+                        f"{chart_key} - "
+                        f"{varga_names.get(chart_key, '')}"
+                    ),
+                    chart,
+                )
             )
 
-        else:
-
-            right_chart = ""
-
-
-        varga_html += f"""
-        <tr>
-
-            <td class="varga-column">
-
-                {left_chart}
-
-            </td>
-
-
-            <td class="varga-column">
-
-                {right_chart}
-
-            </td>
-
-        </tr>
-        """
-
-
-    varga_html += """
-    </tbody>
-    </table>
-    """
-
-
-    # =========================================================
-    # RASHIFAL
-    # =========================================================
+    varga_html = (
+        '<div class="charts-grid">'
+        +
+        "".join(
+            (
+                '<div class="chart-col">'
+                + block
+                + '</div>'
+            )
+            for block in chart_blocks
+        )
+        +
+        "</div>"
+    )
 
     rashifal = (
         result.get(
@@ -2824,139 +2126,67 @@ def build_pdf_html(
         or {}
     )
 
+    rashifal_rows = ""
 
-    rashifal_html = ""
+    for key, label in [
+        (
+            "overall",
+            "Overall",
+        ),
+        (
+            "career",
+            "Career",
+        ),
+        (
+            "finance",
+            "Finance",
+        ),
+        (
+            "love",
+            "Love",
+        ),
+        (
+            "health",
+            "Health",
+        ),
+        (
+            "lucky_number",
+            "Lucky Number",
+        ),
+        (
+            "lucky_color",
+            "Lucky Color",
+        ),
+    ]:
 
-
-    if rashifal:
-
-        rashifal_html = f"""
-        <table>
-
+        if key in rashifal:
+            rashifal_rows += f'''
             <tr>
-
                 <td class="strong">
-                    Overall
+                    {safe(label)}
                 </td>
-
                 <td>
-                    {safe(rashifal.get('overall'))}
+                    {safe(rashifal.get(key))}
                 </td>
-
             </tr>
+            '''
 
-
-            <tr>
-
-                <td class="strong">
-                    Career
-                </td>
-
-                <td>
-                    {safe(rashifal.get('career'))}
-                </td>
-
-            </tr>
-
-
-            <tr>
-
-                <td class="strong">
-                    Finance
-                </td>
-
-                <td>
-                    {safe(rashifal.get('finance'))}
-                </td>
-
-            </tr>
-
-
-            <tr>
-
-                <td class="strong">
-                    Love
-                </td>
-
-                <td>
-                    {safe(rashifal.get('love'))}
-                </td>
-
-            </tr>
-
-
-            <tr>
-
-                <td class="strong">
-                    Health
-                </td>
-
-                <td>
-                    {safe(rashifal.get('health'))}
-                </td>
-
-            </tr>
-
-
-            <tr>
-
-                <td class="strong">
-                    Lucky Number
-                </td>
-
-                <td>
-                    {safe(rashifal.get('lucky_number'))}
-                </td>
-
-            </tr>
-
-
-            <tr>
-
-                <td class="strong">
-                    Lucky Color
-                </td>
-
-                <td>
-                    {safe(rashifal.get('lucky_color'))}
-                </td>
-
-            </tr>
-
-        </table>
-        """
-
-
-    # =========================================================
-    # CALCULATION NOTES
-    # =========================================================
-
-    notes_html = ""
-
-
-    for note in (
-        result.get(
-            "calculation_notes",
-            []
-        )
-        or []
-    ):
-
-        notes_html += f"""
+    notes_html = "".join(
+        f'''
         <div class="note">
-
             • {safe(note)}
-
         </div>
-        """
-
-
-    # =========================================================
-    # LANGUAGE TITLES
-    # =========================================================
+        '''
+        for note in (
+            result.get(
+                "calculation_notes",
+                []
+            )
+            or []
+        )
+    )
 
     if data.lang == "or":
-
         report_title = (
             "ବୈଦିକ ଜାତକ ଓ କୁଣ୍ଡଳୀ"
         )
@@ -2966,9 +2196,7 @@ def build_pdf_html(
             "ବୈଦିକ ଜ୍ୟୋତିଷ ଗଣନା"
         )
 
-
     elif data.lang == "hi":
-
         report_title = (
             "वैदिक जन्म कुंडली"
         )
@@ -2978,9 +2206,7 @@ def build_pdf_html(
             "वैदिक ज्योतिष गणना"
         )
 
-
     else:
-
         report_title = (
             "Vedic Jatak & Kundli Report"
         )
@@ -2990,1381 +2216,625 @@ def build_pdf_html(
             "Vedic Astrology Calculation"
         )
 
-
-    # =========================================================
-    # FINAL HTML
-    # =========================================================
-
-    return f"""
-<!DOCTYPE html>
-
-<html>
-
-<head>
-
-<meta charset="UTF-8"/>
-
-
-<style>
-
-
-/* =========================================================
-   UNICODE FONT
-========================================================= */
-
-@font-face {{
-
-    font-family:
-        "{pdf_font_name}";
-
-    src:
-        url("{pdf_font_uri}");
-
-}}
-
-
-/* =========================================================
-   PAGE
-========================================================= */
-
-@page {{
-
-    size:
-        A4;
-
-    margin:
-        11mm;
-
-}}
-
-
-html,
-body {{
-
-    font-family:
-        "{pdf_font_name}";
-
-    color:
-        #1e293b;
-
-    font-size:
-        9px;
-
-    line-height:
-        1.45;
-
-}}
-
-
-div,
-span,
-p,
-table,
-thead,
-tbody,
-tr,
-td,
-th,
-strong {{
-
-    font-family:
-        "{pdf_font_name}";
-
-}}
-
-
-/* =========================================================
-   HEADER
-========================================================= */
-
-.header {{
-
-    text-align:
-        center;
-
-    border-bottom:
-        3px solid #b71c1c;
-
-    padding-bottom:
-        10px;
-
-    margin-bottom:
-        14px;
-
-}}
-
-
-.title {{
-
-    color:
-        #b71c1c;
-
-    font-size:
-        20px;
-
-    margin-bottom:
-        4px;
-
-}}
-
-
-.subtitle {{
-
-    color:
-        #64748b;
-
-    font-size:
-        9px;
-
-}}
-
-
-/* =========================================================
-   SECTION TITLE
-========================================================= */
-
-.section-title {{
-
-    background-color:
-        #b71c1c;
-
-    color:
-        #ffffff;
-
-    font-size:
-        12px;
-
-    padding:
-        7px;
-
-    margin-top:
-        14px;
-
-    margin-bottom:
-        7px;
-
-}}
-
-
-.sub-title {{
-
-    color:
-        #b71c1c;
-
-    font-size:
-        11px;
-
-    border-bottom:
-        1px solid #b71c1c;
-
-    padding-bottom:
-        4px;
-
-    margin-top:
-        10px;
-
-    margin-bottom:
-        6px;
-
-}}
-
-
-/* =========================================================
-   NORMAL TABLE
-========================================================= */
-
-table {{
-
-    width:
-        100%;
-
-    border-collapse:
-        collapse;
-
-    margin-bottom:
-        8px;
-
-}}
-
-
-th {{
-
-    background-color:
-        #f1f5f9;
-
-    color:
-        #0f172a;
-
-    border:
-        1px solid #94a3b8;
-
-    padding:
-        5px;
-
-    font-size:
-        7.5px;
-
-    text-align:
-        left;
-
-}}
-
-
-td {{
-
-    color:
-        #334155;
-
-    border:
-        1px solid #cbd5e1;
-
-    padding:
-        5px;
-
-    font-size:
-        7.5px;
-
-    vertical-align:
-        top;
-
-}}
-
-
-.strong {{
-
-    color:
-        #0f172a;
-
-}}
-
-
-/* =========================================================
-   BIRTH BOX
-========================================================= */
-
-.birth-box {{
-
-    background-color:
-        #fffbeb;
-
-    border:
-        1px solid #fde68a;
-
-    padding:
-        7px;
-
-}}
-
-
-/* =========================================================
-   NOTES
-========================================================= */
-
-.mini-info {{
-
-    background-color:
-        #f8fafc;
-
-    border:
-        1px solid #e2e8f0;
-
-    padding:
-        6px;
-
-    margin-bottom:
-        7px;
-
-}}
-
-
-.note {{
-
-    background-color:
-        #eff6ff;
-
-    border:
-        1px solid #bfdbfe;
-
-    padding:
-        6px;
-
-    margin-bottom:
-        4px;
-
-    color:
-        #475569;
-
-}}
-
-
-/* =========================================================
-   TRADITIONAL ODIA CHART LAYOUT
-========================================================= */
-
-.varga-layout {{
-
-    width:
-        100%;
-
-    border-collapse:
-        separate;
-
-    border-spacing:
-        5px;
-
-    border:
-        none;
-
-}}
-
-
-.varga-layout > tbody > tr > td {{
-
-    border:
-        none;
-
-}}
-
-
-.varga-column {{
-
-    width:
-        50%;
-
-    vertical-align:
-        top;
-
-    padding:
-        4px;
-
-}}
-
-
-.odia-chart-block {{
-
-    width:
-        100%;
-
-    margin-bottom:
-        12px;
-
-    page-break-inside:
-        avoid;
-
-}}
-
-
-.odia-chart-heading {{
-
-    color:
-        #b71c1c;
-
-    font-size:
-        11px;
-
-    text-align:
-        center;
-
-    margin-bottom:
-        2px;
-
-}}
-
-
-.odia-chart-lagna {{
-
-    color:
-        #64748b;
-
-    font-size:
-        7.5px;
-
-    text-align:
-        center;
-
-    margin-bottom:
-        4px;
-
-}}
-
-
-.odia-chart-svg {{
-
-    width:
-        100%;
-
-    height:
-        auto;
-
-    display:
-        block;
-
-}}
-
-
-/* =========================================================
-   PAGE BREAK
-========================================================= */
-
-.page-break {{
-
-    page-break-before:
-        always;
-
-}}
-
-</style>
-
-</head>
-
-
-<body>
-
-
-<!-- =====================================================
-     HEADER
-===================================================== -->
-
-<div class="header">
-
-    <div class="title">
-
-        {report_title}
-
-    </div>
-
-
-    <div class="subtitle">
-
-        {report_subtitle}
-
-    </div>
-
-</div>
-
-
-<!-- =====================================================
-     BIRTH DETAILS
-===================================================== -->
-
-<div class="section-title">
-
-    Birth Details / ଜନ୍ମ ବିବରଣୀ
-
-</div>
-
-
-<div class="birth-box">
-
-
-<table>
-
-
-<tr>
-
-    <td class="strong">
-        Name
-    </td>
-
-    <td>
-        {safe(data.name)}
-    </td>
-
-
-    <td class="strong">
-        Date
-    </td>
-
-    <td>
-        {safe(data.date)}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Time
-    </td>
-
-    <td>
-        {safe(data.time)}
-    </td>
-
-
-    <td class="strong">
-        Timezone
-    </td>
-
-    <td>
-        UTC {safe(data.tz_offset)}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Latitude
-    </td>
-
-    <td>
-        {safe(data.latitude)}
-    </td>
-
-
-    <td class="strong">
-        Longitude
-    </td>
-
-    <td>
-        {safe(data.longitude)}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Ayanamsha
-    </td>
-
-    <td>
-
-        {
-            safe(
-                result.get(
-                    "ayanamsha_mode"
-                )
-                or
-                data.ayanamsha
-            )
-        }
-
-    </td>
-
-
-    <td class="strong">
-        Ayanamsha Value
-    </td>
-
-    <td>
-
-        {
-            safe(
-                result.get(
-                    "ayanamsha_value"
-                )
-            )
-        }
-
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Node
-    </td>
-
-    <td>
-
-        {
-            safe(
-                result.get(
-                    "node_type"
-                )
-                or
-                data.node_type
-            )
-        }
-
-    </td>
-
-
-    <td class="strong">
-        Lagna
-    </td>
-
-    <td>
-        {safe(lagna.get('sign'))}
-    </td>
-
-</tr>
-
-
-</table>
-
-
-</div>
-
-
-<!-- =====================================================
-     D1 TRADITIONAL ODIA CHART
-===================================================== -->
-
-<div class="section-title">
-
-    Rashi Chakra / ରାଶି ଚକ୍ର
-
-</div>
-
-
-{
-    build_odia_chart(
-        "D1 - Rashi",
+    d1_chart = (
         charts.get(
             "D1"
         )
-        or
-        {
+        or {
             "houses":
                 result.get(
                     "houses",
                     {}
                 ),
-
             "lagna_sign":
                 lagna.get(
                     "sign"
                 ),
         }
     )
-}
 
+    return f'''
+    <!DOCTYPE html>
+    <html>
 
-<!-- =====================================================
-     LAGNA DETAILS
-===================================================== -->
+    <head>
 
-<div class="section-title">
+        <meta charset="UTF-8"/>
 
-    Lagna / ଲଗ୍ନ
+        <style>
 
-</div>
+            @font-face {{
+                font-family:
+                    "{pdf_font_name}";
 
+                src:
+                    url("{pdf_font_uri}");
+            }}
 
-<table>
+            @page {{
+                size:
+                    A4;
 
+                margin:
+                    10mm;
+            }}
 
-<thead>
+            html,
+            body,
+            div,
+            span,
+            p,
+            table,
+            tr,
+            td,
+            th,
+            strong,
+            small {{
+                font-family:
+                    "{pdf_font_name}";
+            }}
 
-<tr>
+            body {{
+                color:
+                    #1e293b;
 
-    <th>
-        Rashi
-    </th>
+                font-size:
+                    9px;
 
-    <th>
-        Degree
-    </th>
+                line-height:
+                    1.45;
+            }}
 
-    <th>
-        Nakshatra
-    </th>
+            .header {{
+                text-align:
+                    center;
 
-    <th>
-        Pada
-    </th>
+                border-bottom:
+                    3px solid #0d7880;
 
-    <th>
-        Navamsa
-    </th>
+                padding-bottom:
+                    10px;
 
-</tr>
+                margin-bottom:
+                    12px;
+            }}
 
-</thead>
+            .title {{
+                color:
+                    #0d7880;
 
+                font-size:
+                    20px;
+            }}
 
-<tbody>
+            .subtitle {{
+                color:
+                    #64748b;
 
+                font-size:
+                    9px;
+            }}
 
-<tr>
+            .section-title {{
+                background:
+                    #0d7880;
 
-    <td>
-        {safe(lagna.get('sign'))}
-    </td>
+                color:
+                    #ffffff;
 
-    <td>
-        {safe(lagna.get('degree'))}
-    </td>
+                font-size:
+                    12px;
 
-    <td>
-        {safe(lagna.get('nakshatra'))}
-    </td>
+                padding:
+                    7px;
 
-    <td>
-        {safe(lagna.get('pada'))}
-    </td>
+                margin:
+                    13px 0 7px;
+            }}
 
-    <td>
-        {safe(lagna.get('navamsa_sign'))}
-    </td>
+            table {{
+                width:
+                    100%;
 
-</tr>
+                border-collapse:
+                    collapse;
 
+                margin-bottom:
+                    8px;
+            }}
 
-</tbody>
+            th {{
+                background:
+                    #eef7f7;
 
+                color:
+                    #0f172a;
 
-</table>
+                border:
+                    1px solid #94a3b8;
 
+                padding:
+                    5px;
 
-<!-- =====================================================
-     PLANETS
-===================================================== -->
+                font-size:
+                    7.5px;
 
-<div class="section-title">
+                text-align:
+                    left;
+            }}
 
-    Planetary Positions / ଗ୍ରହ ସ୍ଥିତି
+            td {{
+                border:
+                    1px solid #cbd5e1;
 
-</div>
+                padding:
+                    5px;
 
+                font-size:
+                    7.5px;
 
-<table>
+                vertical-align:
+                    top;
+            }}
 
+            .birth-box {{
+                background:
+                    #fffbeb;
 
-<thead>
+                border:
+                    1px solid #fde68a;
 
-<tr>
+                padding:
+                    7px;
+            }}
 
-    <th>
-        Planet
-    </th>
+            .strong {{
+                color:
+                    #0f172a;
+            }}
 
-    <th>
-        Rashi
-    </th>
+            .note {{
+                background:
+                    #eff6ff;
 
-    <th>
-        Degree
-    </th>
+                border:
+                    1px solid #bfdbfe;
 
-    <th>
-        Nakshatra
-    </th>
+                padding:
+                    6px;
 
-    <th>
-        Pada
-    </th>
+                margin-bottom:
+                    4px;
+            }}
 
-    <th>
-        House
-    </th>
+            .chip {{
+                display:
+                    inline-block;
 
-    <th>
-        D9
-    </th>
+                border:
+                    1px solid #bae6e6;
 
-    <th>
-        Dignity
-    </th>
+                background:
+                    #f0fdfa;
 
-    <th>
-        Status
-    </th>
+                padding:
+                    4px 6px;
 
-</tr>
+                margin:
+                    2px;
 
-</thead>
+                border-radius:
+                    5px;
+            }}
 
+            .page-break {{
+                page-break-before:
+                    always;
+            }}
 
-<tbody>
+            .charts-grid {{
+                font-size:
+                    0;
+            }}
 
-    {planet_rows}
+            .chart-col {{
+                display:
+                    inline-block;
 
-</tbody>
+                width:
+                    48%;
 
+                margin:
+                    1%;
 
-</table>
+                vertical-align:
+                    top;
 
+                font-size:
+                    9px;
 
-<!-- =====================================================
-     HOUSES
-===================================================== -->
+                page-break-inside:
+                    avoid;
+            }}
 
-<div class="section-title">
+            .chart-block {{
+                width:
+                    100%;
 
-    12 Bhava / ଦ୍ୱାଦଶ ଭାବ
+                page-break-inside:
+                    avoid;
 
-</div>
+                margin-bottom:
+                    10px;
+            }}
 
+            .chart-title {{
+                text-align:
+                    center;
 
-<table>
+                color:
+                    #0d7880;
 
+                font-size:
+                    10px;
 
-<thead>
+                margin-bottom:
+                    3px;
+            }}
 
-<tr>
+            .chart-svg {{
+                width:
+                    100%;
 
-    <th>
-        House
-    </th>
+                height:
+                    auto;
 
-    <th>
-        Rashi
-    </th>
+                display:
+                    block;
+            }}
 
-    <th>
-        Lord
-    </th>
+        </style>
 
-    <th>
-        Lord House
-    </th>
+    </head>
 
-    <th>
-        Planets
-    </th>
+    <body>
 
-</tr>
+        <div class="header">
 
-</thead>
+            <div class="title">
+                {report_title}
+            </div>
 
+            <div class="subtitle">
+                {report_subtitle}
+            </div>
 
-<tbody>
+        </div>
 
-    {house_rows}
+        <div class="section-title">
+            Birth Details / ଜନ୍ମ ବିବରଣୀ
+        </div>
 
-</tbody>
+        <div class="birth-box">
 
+            <table>
 
-</table>
+                <tr>
+                    <td><b>Name</b></td>
+                    <td>{safe(data.name)}</td>
+                    <td><b>Date</b></td>
+                    <td>{safe(data.date)}</td>
+                </tr>
 
+                <tr>
+                    <td><b>Time</b></td>
+                    <td>{safe(data.time)}</td>
+                    <td><b>Timezone</b></td>
+                    <td>UTC {safe(data.tz_offset)}</td>
+                </tr>
 
-<!-- =====================================================
-     PANCHANGA
-===================================================== -->
+                <tr>
+                    <td><b>Latitude</b></td>
+                    <td>{safe(data.latitude)}</td>
+                    <td><b>Longitude</b></td>
+                    <td>{safe(data.longitude)}</td>
+                </tr>
 
-<div class="section-title">
-
-    Panchanga / ପଞ୍ଚାଙ୍ଗ
-
-</div>
-
-
-<table>
-
-
-<tr>
-
-    <td class="strong">
-        Tithi
-    </td>
-
-    <td>
-        {safe(panchanga.get('tithi'))}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Paksha
-    </td>
-
-    <td>
-        {safe(panchanga.get('paksha'))}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Vara
-    </td>
-
-    <td>
-        {safe(panchanga.get('vara'))}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Nakshatra
-    </td>
-
-    <td>
-        {safe(panchanga.get('nakshatra'))}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Yoga
-    </td>
-
-    <td>
-        {safe(panchanga.get('yoga'))}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td class="strong">
-        Karana
-    </td>
-
-    <td>
-        {safe(panchanga.get('karana'))}
-    </td>
-
-</tr>
-
-
-</table>
-
-
-<!-- =====================================================
-     CURRENT VIMSHOTTARI
-===================================================== -->
-
-<div class="section-title">
-
-    Current Vimshottari Dasha / ବର୍ତ୍ତମାନ ଦଶା
-
-</div>
-
-
-<table>
-
-
-<thead>
-
-<tr>
-
-    <th>
-        Level
-    </th>
-
-    <th>
-        Lord
-    </th>
-
-    <th>
-        Start
-    </th>
-
-    <th>
-        End
-    </th>
-
-</tr>
-
-</thead>
-
-
-<tbody>
-
-
-<tr>
-
-    <td>
-        Mahadasha
-    </td>
-
-    <td>
-        {safe(current_md.get('lord'))}
-    </td>
-
-    <td>
-        {safe(current_md.get('start_date'))}
-    </td>
-
-    <td>
-        {safe(current_md.get('end_date'))}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td>
-        Antardasha
-    </td>
-
-    <td>
-        {safe(current_ad.get('lord'))}
-    </td>
-
-    <td>
-        {safe(current_ad.get('start_date'))}
-    </td>
-
-    <td>
-        {safe(current_ad.get('end_date'))}
-    </td>
-
-</tr>
-
-
-<tr>
-
-    <td>
-        Pratyantardasha
-    </td>
-
-    <td>
-        {safe(current_pd.get('lord'))}
-    </td>
-
-    <td>
-        {safe(current_pd.get('start_date'))}
-    </td>
-
-    <td>
-        {safe(current_pd.get('end_date'))}
-    </td>
-
-</tr>
-
-
-</tbody>
-
-
-</table>
-
-
-<div class="sub-title">
-
-    Mahadasha Timeline
-
-</div>
-
-
-<table>
-
-
-<thead>
-
-<tr>
-
-    <th>
-        Lord
-    </th>
-
-    <th>
-        Start
-    </th>
-
-    <th>
-        End
-    </th>
-
-    <th>
-        Years
-    </th>
-
-    <th>
-        Status
-    </th>
-
-</tr>
-
-</thead>
-
-
-<tbody>
-
-    {dasha_rows}
-
-</tbody>
-
-
-</table>
-
-
-<!-- =====================================================
-     YOGA
-===================================================== -->
-
-<div class="section-title">
-
-    Yogas / ଯୋଗ
-
-</div>
-
-
-<table>
-
-
-<thead>
-
-<tr>
-
-    <th>
-        Yoga
-    </th>
-
-    <th>
-        Basis
-    </th>
-
-</tr>
-
-</thead>
-
-
-<tbody>
-
-    {yoga_rows}
-
-</tbody>
-
-
-</table>
-
-
-<!-- =====================================================
-     DOSHA
-===================================================== -->
-
-<div class="section-title">
-
-    Dosha Analysis / ଦୋଷ ବିଶ୍ଳେଷଣ
-
-</div>
-
-
-<table>
-
-
-<thead>
-
-<tr>
-
-    <th>
-        Dosha
-    </th>
-
-    <th>
-        Status
-    </th>
-
-    <th>
-        Details
-    </th>
-
-</tr>
-
-</thead>
-
-
-<tbody>
-
-    {dosha_rows}
-
-</tbody>
-
-
-</table>
-
-
-<!-- =====================================================
-     STRENGTH
-===================================================== -->
-
-<div class="section-title">
-
-    Planet Strength / ଗ୍ରହ ବଳ
-
-</div>
-
-
-<div class="mini-info">
-
-    {safe(strength.get('note'))}
-
-</div>
-
-
-<table>
-
-
-<thead>
-
-<tr>
-
-    <th>
-        Planet
-    </th>
-
-    <th>
-        Score
-    </th>
-
-    <th>
-        Strength
-    </th>
-
-    <th>
-        Dignity
-    </th>
-
-    <th>
-        Retrograde
-    </th>
-
-    <th>
-        Combust
-    </th>
-
-</tr>
-
-</thead>
-
-
-<tbody>
-
-    {strength_rows}
-
-</tbody>
-
-
-</table>
-
-
-<!-- =====================================================
-     GOCHAR
-===================================================== -->
-
-<div class="section-title">
-
-    Gochar / ଗୋଚର
-
-</div>
-
-
-<table>
-
-
-<thead>
-
-<tr>
-
-    <th>
-        Planet
-    </th>
-
-    <th>
-        Rashi
-    </th>
-
-    <th>
-        Longitude
-    </th>
-
-    <th>
-        Motion
-    </th>
-
-</tr>
-
-</thead>
-
-
-<tbody>
-
-    {transit_rows}
-
-</tbody>
-
-
-</table>
-
-
-<!-- =====================================================
-     ALL TRADITIONAL ODIA VARGA CHARTS
-===================================================== -->
-
-<div class="page-break">
-</div>
-
-
-<div class="section-title">
-
-    Divisional / Varga Charts / ବର୍ଗ ଚକ୍ର
-
-</div>
-
-
-{varga_html}
-
-
-<!-- =====================================================
-     RASHIFAL
-===================================================== -->
-
-<div class="section-title">
-
-    Daily Rashifal / ଦୈନିକ ରାଶିଫଳ
-
-</div>
-
-
-{rashifal_html}
-
-
-<!-- =====================================================
-     NOTES
-===================================================== -->
-
-<div class="section-title">
-
-    Calculation Notes
-
-</div>
-
-
-{notes_html}
-
-
-</body>
-
-</html>
-"""
+                <tr>
+                    <td><b>Ayanamsha</b></td>
+                    <td>{safe(result.get("ayanamsha_mode") or data.ayanamsha)}</td>
+                    <td><b>Node</b></td>
+                    <td>{safe(result.get("node_type") or data.node_type)}</td>
+                </tr>
+
+            </table>
+
+        </div>
+
+        <div class="section-title">
+            Rashi Chakra / ରାଶି ଚକ୍ର
+        </div>
+
+        {render_chart("D1 - Rashi", d1_chart)}
+
+        <div class="section-title">
+            Lagna / ଲଗ୍ନ
+        </div>
+
+        <table>
+            <tr>
+                <th>Rashi</th>
+                <th>Degree</th>
+                <th>Nakshatra</th>
+                <th>Pada</th>
+                <th>Navamsa</th>
+            </tr>
+
+            <tr>
+                <td>{safe(lagna.get("sign"))}</td>
+                <td>{safe(lagna.get("degree"))}</td>
+                <td>{safe(lagna.get("nakshatra"))}</td>
+                <td>{safe(lagna.get("pada"))}</td>
+                <td>{safe(lagna.get("navamsa_sign"))}</td>
+            </tr>
+        </table>
+
+        <div class="section-title">
+            Planetary Positions / ଗ୍ରହ ସ୍ଥିତି
+        </div>
+
+        <table>
+            <tr>
+                <th>Planet</th>
+                <th>Rashi</th>
+                <th>Degree</th>
+                <th>Nakshatra</th>
+                <th>Pada</th>
+                <th>House</th>
+                <th>D9</th>
+                <th>Dignity</th>
+                <th>Status</th>
+            </tr>
+
+            {planet_rows}
+
+        </table>
+
+        <div class="section-title">
+            12 Bhava / ଦ୍ୱାଦଶ ଭାବ
+        </div>
+
+        <table>
+            <tr>
+                <th>House</th>
+                <th>Rashi</th>
+                <th>Lord</th>
+                <th>Lord House</th>
+                <th>Planets</th>
+            </tr>
+
+            {house_rows}
+
+        </table>
+
+        <div class="section-title">
+            Panchanga / ପଞ୍ଚାଙ୍ଗ
+        </div>
+
+        <table>
+            <tr><td>Tithi</td><td>{safe(panchanga.get("tithi"))}</td></tr>
+            <tr><td>Paksha</td><td>{safe(panchanga.get("paksha"))}</td></tr>
+            <tr><td>Vara</td><td>{safe(panchanga.get("vara"))}</td></tr>
+            <tr><td>Nakshatra</td><td>{safe(panchanga.get("nakshatra"))}</td></tr>
+            <tr><td>Yoga</td><td>{safe(panchanga.get("yoga"))}</td></tr>
+            <tr><td>Karana</td><td>{safe(panchanga.get("karana"))}</td></tr>
+        </table>
+
+        <div class="section-title">
+            Current Vimshottari Dasha
+        </div>
+
+        <table>
+            <tr>
+                <th>Level</th>
+                <th>Lord</th>
+                <th>Start</th>
+                <th>End</th>
+            </tr>
+
+            <tr>
+                <td>Mahadasha</td>
+                <td>{safe(current_md.get("lord"))}</td>
+                <td>{safe(current_md.get("start_date"))}</td>
+                <td>{safe(current_md.get("end_date"))}</td>
+            </tr>
+
+            <tr>
+                <td>Antardasha</td>
+                <td>{safe(current_ad.get("lord"))}</td>
+                <td>{safe(current_ad.get("start_date"))}</td>
+                <td>{safe(current_ad.get("end_date"))}</td>
+            </tr>
+
+            <tr>
+                <td>Pratyantardasha</td>
+                <td>{safe(current_pd.get("lord"))}</td>
+                <td>{safe(current_pd.get("start_date"))}</td>
+                <td>{safe(current_pd.get("end_date"))}</td>
+            </tr>
+
+        </table>
+
+        <table>
+            <tr>
+                <th>Lord</th>
+                <th>Start</th>
+                <th>End</th>
+                <th>Years</th>
+                <th>Status</th>
+            </tr>
+
+            {dasha_rows}
+
+        </table>
+
+        <div class="section-title">
+            Yogas / ଯୋଗ
+        </div>
+
+        <table>
+            <tr>
+                <th>Yoga</th>
+                <th>Basis</th>
+            </tr>
+
+            {yoga_rows}
+
+        </table>
+
+        <div class="section-title">
+            Dosha Analysis / ଦୋଷ ବିଶ୍ଳେଷଣ
+        </div>
+
+        <table>
+            <tr>
+                <th>Dosha</th>
+                <th>Status</th>
+                <th>Details</th>
+            </tr>
+
+            {dosha_rows}
+
+        </table>
+
+        <div class="section-title">
+            Planet Strength / ଗ୍ରହ ବଳ
+        </div>
+
+        <div class="note">
+            {safe(strength.get("note"))}
+        </div>
+
+        <table>
+            <tr>
+                <th>Planet</th>
+                <th>Score</th>
+                <th>Strength</th>
+                <th>Dignity</th>
+                <th>Retrograde</th>
+                <th>Combust</th>
+            </tr>
+
+            {strength_rows}
+
+        </table>
+
+        <div class="section-title">
+            Gochar / ଗୋଚର
+        </div>
+
+        <table>
+            <tr>
+                <th>Planet</th>
+                <th>Rashi</th>
+                <th>Longitude</th>
+                <th>Motion</th>
+            </tr>
+
+            {transit_rows}
+
+        </table>
+
+        <div class="section-title">
+            KP – Krishnamurti Paddhati
+        </div>
+
+        <div class="note">
+            {safe(kp.get("note"))}
+        </div>
+
+        <div>
+            {ruling_html}
+        </div>
+
+        <h4>
+            KP Planets
+        </h4>
+
+        <table>
+            <tr>
+                <th>Planet</th>
+                <th>Position</th>
+                <th>Star Lord</th>
+                <th>Sub Lord</th>
+                <th>Sub-Sub Lord</th>
+            </tr>
+
+            {kp_planet_rows}
+
+        </table>
+
+        <h4>
+            KP Cusps (Placidus)
+        </h4>
+
+        <table>
+            <tr>
+                <th>Cusp</th>
+                <th>Position</th>
+                <th>Sign Lord</th>
+                <th>Star Lord</th>
+                <th>Sub Lord</th>
+                <th>Sub-Sub Lord</th>
+            </tr>
+
+            {kp_cusp_rows}
+
+        </table>
+
+        <div class="page-break">
+        </div>
+
+        <div class="section-title">
+            Divisional / Varga Charts
+        </div>
+
+        {varga_html}
+
+        <div class="section-title">
+            Daily Rashifal / ଦୈନିକ ରାଶିଫଳ
+        </div>
+
+        <table>
+            {rashifal_rows}
+        </table>
+
+        <div class="section-title">
+            Calculation Notes
+        </div>
+
+        {notes_html}
+
+    </body>
+
+    </html>
+    '''
 
 
 # =====================================================================
 # PDF EXPORT
 # =====================================================================
 
-@app.post("/api/export-pdfdd")
-def export_kundli_pdfdd(
+@app.post("/api/export-pdf")
+def export_kundli_pdf(
     data: BirthDataRequest
 ):
-
     try:
-
         if not ASTRO_ENGINE_LOADED:
-
             raise Exception(
                 "Astrology calculation "
                 "engine is not loaded."
             )
-
-
-        # -----------------------------------------------------
-        # Check font before doing calculation
-        # -----------------------------------------------------
 
         font_name, font_path = (
             get_pdf_font(
@@ -4375,56 +2845,27 @@ def export_kundli_pdfdd(
         if not os.path.exists(
             font_path
         ):
-
             raise Exception(
                 f"Required PDF font "
                 f"is missing: {font_path}"
             )
 
-
-        # -----------------------------------------------------
-        # Astrology calculation
-        # -----------------------------------------------------
-
         result = calculate_astrology(
-
-            date_str=
-                data.date,
-
-            time_str=
-                data.time,
-
-            latitude=
-                data.latitude,
-
-            longitude=
-                data.longitude,
-
-            tz_offset=
-                data.tz_offset,
-
-            ayanamsha_mode=
-                data.ayanamsha,
-
-            lang=
-                data.lang,
-
-            node_type=
-                data.node_type,
+            date_str=data.date,
+            time_str=data.time,
+            latitude=data.latitude,
+            longitude=data.longitude,
+            tz_offset=data.tz_offset,
+            ayanamsha_mode=data.ayanamsha,
+            lang=data.lang,
+            node_type=data.node_type,
         )
-
 
         result["name"] = (
             data.name
         )
 
-
-        # -----------------------------------------------------
-        # Rashifal
-        # -----------------------------------------------------
-
         moon_rashi_en = (
-
             result
             .get(
                 "planets_en",
@@ -4440,21 +2881,19 @@ def export_kundli_pdfdd(
             )
         )
 
-
         result["rashifal"] = (
             get_daily_rashifal(
-
                 moon_rashi_en,
-
-                lang=
-                    data.lang,
+                lang=data.lang,
             )
         )
 
-
-        # -----------------------------------------------------
-        # Generate HTML
-        # -----------------------------------------------------
+        result["kp"] = (
+            calculate_kp_details(
+                result,
+                data,
+            )
+        )
 
         html_content = (
             build_pdf_html(
@@ -4463,57 +2902,15 @@ def export_kundli_pdfdd(
             )
         )
 
-
-        # -----------------------------------------------------
-        # HTML -> PDF
-        # -----------------------------------------------------
-
-        pdf_buffer = (
-            io.BytesIO()
-        )
-
-
-        pisa_status = (
-            pisa.CreatePDF(
-
-                src=
-                    io.StringIO(
-                        html_content
-                    ),
-
-                dest=
-                    pdf_buffer,
-
-                encoding=
-                    "UTF-8",
-            )
-        )
-
-
-        if pisa_status.err:
-
-            raise Exception(
-                "PDF generation failed. "
-                "xhtml2pdf returned an error."
-            )
-
-
-        pdf_bytes = (
-            pdf_buffer
-            .getvalue()
-        )
-
+        pdf_bytes = HTML(
+            string=html_content,
+            base_url=BASE_DIR,
+        ).write_pdf()
 
         if not pdf_bytes:
-
             raise Exception(
                 "Generated PDF is empty."
             )
-
-
-        # -----------------------------------------------------
-        # BASE64
-        # -----------------------------------------------------
 
         pdf_base64 = (
             base64
@@ -4525,21 +2922,11 @@ def export_kundli_pdfdd(
             )
         )
 
-
-        # -----------------------------------------------------
-        # Filename
-        # -----------------------------------------------------
-
         safe_name = re.sub(
-
             r"[^A-Za-z0-9_-]+",
-
             "_",
-
             data.name
-
         ).strip("_")
-
 
         filename = (
             f"Jatak_"
@@ -4547,19 +2934,18 @@ def export_kundli_pdfdd(
             f".pdf"
         )
 
-
         print(
             "✅ PDF GENERATED:",
             filename,
             len(pdf_bytes),
             "bytes",
             "font:",
-            font_name
+            font_name,
+            "chart_style:",
+            data.chart_style,
         )
 
-
         return sanitize_response({
-
             "status":
                 "success",
 
@@ -4571,11 +2957,12 @@ def export_kundli_pdfdd(
 
             "font":
                 font_name,
+
+            "chart_style":
+                data.chart_style,
         })
 
-
     except Exception as e:
-
         print(
             "❌ PDF EXPORT ERROR:",
             str(e)
@@ -4584,9 +2971,7 @@ def export_kundli_pdfdd(
         traceback.print_exc()
 
         raise HTTPException(
-
             status_code=400,
-
             detail=(
                 f"PDF Export Error: "
                 f"{str(e)}"
@@ -4594,102 +2979,6 @@ def export_kundli_pdfdd(
         )
 
 
-@app.post("/api/export-pdf")
-def export_kundli_pdf(
-    data: BirthDataRequest
-):
-    try:
-
-        if not ASTRO_ENGINE_LOADED:
-            raise Exception(
-                "Astrology calculation engine is not loaded."
-            )
-
-        font_name, font_path = get_pdf_font(
-            data.lang
-        )
-
-        if not os.path.exists(font_path):
-            raise Exception(
-                f"Required PDF font is missing: {font_path}"
-            )
-
-        result = calculate_astrology(
-            date_str=data.date,
-            time_str=data.time,
-            latitude=data.latitude,
-            longitude=data.longitude,
-            tz_offset=data.tz_offset,
-            ayanamsha_mode=data.ayanamsha,
-            lang=data.lang,
-            node_type=data.node_type,
-        )
-
-        result["name"] = data.name
-
-        moon_rashi_en = (
-            result
-            .get("planets_en", {})
-            .get("Moon", {})
-            .get("sign_en", "Aries")
-        )
-
-        result["rashifal"] = get_daily_rashifal(
-            moon_rashi_en,
-            lang=data.lang,
-        )
-
-        html_content = build_pdf_html(
-            result,
-            data
-        )
-
-        # -----------------------------------------
-        # IMPORTANT:
-        # Use WeasyPrint instead of xhtml2pdf
-        # -----------------------------------------
-
-        pdf_bytes = HTML(
-            string=html_content,
-            base_url=BASE_DIR
-        ).write_pdf()
-
-        if not pdf_bytes:
-            raise Exception(
-                "Generated PDF is empty."
-            )
-
-        pdf_base64 = base64.b64encode(
-            pdf_bytes
-        ).decode("utf-8")
-
-        safe_name = re.sub(
-            r"[^A-Za-z0-9_-]+",
-            "_",
-            data.name
-        ).strip("_")
-
-        filename = (
-            f"Jatak_"
-            f"{safe_name or 'Report'}"
-            f".pdf"
-        )
-
-        return {
-            "status": "success",
-            "filename": filename,
-            "pdf_base64": pdf_base64,
-            "font": font_name,
-        }
-
-    except Exception as e:
-
-        traceback.print_exc()
-
-        raise HTTPException(
-            status_code=400,
-            detail=f"PDF Export Error: {str(e)}"
-        )
 # =====================================================================
 # ODIA CALENDAR
 # =====================================================================
