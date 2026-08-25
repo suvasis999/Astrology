@@ -17,6 +17,30 @@ from pydantic import BaseModel, Field
 from xhtml2pdf import pisa
 import fitz  # PyMuPDF
 
+BASE_DIR = os.path.dirname(
+    os.path.abspath(__file__)
+)
+
+FONT_DIR = os.path.join(
+    BASE_DIR,
+    "fonts"
+)
+
+ODIA_FONT_PATH = os.path.join(
+    FONT_DIR,
+    "NotoSansOriya-Regular.ttf"
+)
+
+HINDI_FONT_PATH = os.path.join(
+    FONT_DIR,
+    "NotoSansDevanagari-Regular.ttf"
+)
+
+ENGLISH_FONT_PATH = os.path.join(
+    FONT_DIR,
+    "NotoSans-Regular.ttf"
+)
+
 try:
     from engine import calculate_astrology, get_daily_rashifal
     from odia_calendar import get_kohinoor_odia_panchang, get_kohinoor_month_calendar
@@ -182,6 +206,7 @@ class BirthDataRequest(BaseModel):
 
 @app.get("/")
 def health_check():
+
     try:
         import swisseph  # noqa
         swe_ok = True
@@ -196,12 +221,36 @@ def health_check():
 
     return {
         "status": "ok",
-        "version": "2.0.0",
-        "astro_engine_loaded": ASTRO_ENGINE_LOADED,
-        "swisseph_installed": swe_ok,
-        "fitz_installed": fitz_ok,
-        "dictionary_entries": len(ODIA_DICT),
-        "message": "Vedic Astro Engine & Odia Reader Active",
+        "version": "2.1.0",
+
+        "astro_engine_loaded":
+            ASTRO_ENGINE_LOADED,
+
+        "swisseph_installed":
+            swe_ok,
+
+        "fitz_installed":
+            fitz_ok,
+
+        "dictionary_entries":
+            len(ODIA_DICT),
+
+        "fonts": {
+            "odia": os.path.exists(
+                ODIA_FONT_PATH
+            ),
+
+            "hindi": os.path.exists(
+                DEVANAGARI_FONT_PATH
+            ),
+
+            "english": os.path.exists(
+                ENGLISH_FONT_PATH
+            ),
+        },
+
+        "message":
+            "Vedic Astro Engine & Odia Reader Active",
     }
 
 
@@ -417,42 +466,104 @@ def build_pdf_html_(result: dict, data: BirthDataRequest) -> str:
     </html>
     """
 
-def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
+def build_pdf_html(
+    result: dict,
+    data: BirthDataRequest
+) -> str:
 
     # =========================================================
-    # COMMON HELPERS
+    # FONT
     # =========================================================
 
-    def yes_no(value):
-        return "Yes" if value else "No"
+    pdf_font_name, pdf_font_path = get_pdf_font(
+        data.lang
+    )
+
+    if not os.path.exists(pdf_font_path):
+
+        raise Exception(
+            f"PDF font not found: {pdf_font_path}"
+        )
+
+    # xhtml2pdf works better with file URI
+    pdf_font_uri = (
+        "file:///" +
+        pdf_font_path
+        .replace("\\", "/")
+        .lstrip("/")
+    )
+
+    # =========================================================
+    # HELPERS
+    # =========================================================
 
     def safe(value, default="-"):
-        if value is None or value == "":
+
+        if value is None:
             return default
+
+        if value == "":
+            return default
+
         return str(value)
 
+
+    def yes_no(value):
+
+        if data.lang == "or":
+            return "ହଁ" if value else "ନା"
+
+        return "Yes" if value else "No"
+
+
     # =========================================================
-    # PLANET TABLE
+    # LAGNA
+    # =========================================================
+
+    lagna = result.get(
+        "lagna",
+        {}
+    )
+
+
+    # =========================================================
+    # PLANETS
     # =========================================================
 
     planet_rows = ""
 
-    for p_name, p in result.get("planets", {}).items():
+    for p_name, p in result.get(
+        "planets",
+        {}
+    ).items():
 
         status = []
 
-        if p.get("is_retrograde"):
-            status.append("Retrograde")
+        if p.get(
+            "is_retrograde"
+        ):
+            status.append(
+                "Retrograde"
+            )
 
-        if p.get("is_combust"):
-            status.append("Combust")
+        if p.get(
+            "is_combust"
+        ):
+            status.append(
+                "Combust"
+            )
 
         if not status:
-            status.append("Direct")
+            status.append(
+                "Direct"
+            )
 
         planet_rows += f"""
         <tr>
-            <td>{safe(p_name)}</td>
+
+            <td class="strong">
+                {safe(p_name)}
+            </td>
 
             <td>
                 {safe(p.get('sign'))}
@@ -485,12 +596,13 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             <td>
                 {", ".join(status)}
             </td>
+
         </tr>
         """
 
 
     # =========================================================
-    # HOUSE TABLE
+    # HOUSES
     # =========================================================
 
     house_rows = ""
@@ -510,18 +622,23 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             []
         )
 
-        lord_info = (
-            house_lords.get(house_no)
+        lord_data = (
+            house_lords.get(
+                house_no
+            )
             or
-            house_lords.get(str(house_no))
+            house_lords.get(
+                str(house_no)
+            )
             or
             {}
         )
 
         house_rows += f"""
         <tr>
+
             <td>
-                {house_no}
+                {safe(house_no)}
             </td>
 
             <td>
@@ -529,19 +646,23 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             </td>
 
             <td>
-                {safe(
-                    house.get('lord')
-                    or
-                    lord_info.get('lord')
-                )}
+                {
+                    safe(
+                        house.get('lord')
+                        or
+                        lord_data.get('lord')
+                    )
+                }
             </td>
 
             <td>
-                {safe(
-                    lord_info.get(
-                        'lord_house'
+                {
+                    safe(
+                        lord_data.get(
+                            'lord_house'
+                        )
                     )
-                )}
+                }
             </td>
 
             <td>
@@ -551,6 +672,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
                     else "-"
                 }
             </td>
+
         </tr>
         """
 
@@ -564,41 +686,9 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         {}
     )
 
-    panchanga_rows = f"""
-        <tr>
-            <td>Tithi</td>
-            <td>{safe(panchanga.get('tithi'))}</td>
-        </tr>
-
-        <tr>
-            <td>Paksha</td>
-            <td>{safe(panchanga.get('paksha'))}</td>
-        </tr>
-
-        <tr>
-            <td>Vara</td>
-            <td>{safe(panchanga.get('vara'))}</td>
-        </tr>
-
-        <tr>
-            <td>Nakshatra</td>
-            <td>{safe(panchanga.get('nakshatra'))}</td>
-        </tr>
-
-        <tr>
-            <td>Yoga</td>
-            <td>{safe(panchanga.get('yoga'))}</td>
-        </tr>
-
-        <tr>
-            <td>Karana</td>
-            <td>{safe(panchanga.get('karana'))}</td>
-        </tr>
-    """
-
 
     # =========================================================
-    # MAHADASHA TABLE
+    # DASHA
     # =========================================================
 
     dasha_rows = ""
@@ -616,6 +706,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
         dasha_rows += f"""
         <tr>
+
             <td>
                 {safe(d.get('lord'))}
             </td>
@@ -635,74 +726,40 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             <td>
                 {active}
             </td>
+
         </tr>
         """
 
 
     # =========================================================
-    # CURRENT DASHA
+    # CURRENT VIMSHOTTARI
     # =========================================================
 
-    vim = result.get(
+    vimshottari = result.get(
         "vimshottari",
         {}
     )
 
     current_md = (
-        vim.get(
+        vimshottari.get(
             "current_mahadasha"
         )
-        or
-        {}
+        or {}
     )
 
     current_ad = (
-        vim.get(
+        vimshottari.get(
             "current_antardasha"
         )
-        or
-        {}
+        or {}
     )
 
     current_pd = (
-        vim.get(
+        vimshottari.get(
             "current_pratyantardasha"
         )
-        or
-        {}
+        or {}
     )
-
-    current_dasha_html = f"""
-    <table>
-        <tr>
-            <th>Level</th>
-            <th>Lord</th>
-            <th>Start</th>
-            <th>End</th>
-        </tr>
-
-        <tr>
-            <td>Mahadasha</td>
-            <td>{safe(current_md.get('lord'))}</td>
-            <td>{safe(current_md.get('start_date'))}</td>
-            <td>{safe(current_md.get('end_date'))}</td>
-        </tr>
-
-        <tr>
-            <td>Antardasha</td>
-            <td>{safe(current_ad.get('lord'))}</td>
-            <td>{safe(current_ad.get('start_date'))}</td>
-            <td>{safe(current_ad.get('end_date'))}</td>
-        </tr>
-
-        <tr>
-            <td>Pratyantardasha</td>
-            <td>{safe(current_pd.get('lord'))}</td>
-            <td>{safe(current_pd.get('start_date'))}</td>
-            <td>{safe(current_pd.get('end_date'))}</td>
-        </tr>
-    </table>
-    """
 
 
     # =========================================================
@@ -711,28 +768,26 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
     yoga_rows = ""
 
-    yogas = result.get(
+    for yoga in result.get(
         "yogas",
         []
-    )
+    ):
 
-    if yogas:
+        yoga_rows += f"""
+        <tr>
 
-        for yoga in yogas:
+            <td class="strong">
+                {safe(yoga.get('name'))}
+            </td>
 
-            yoga_rows += f"""
-            <tr>
-                <td>
-                    {safe(yoga.get('name'))}
-                </td>
+            <td>
+                {safe(yoga.get('basis'))}
+            </td>
 
-                <td>
-                    {safe(yoga.get('basis'))}
-                </td>
-            </tr>
-            """
+        </tr>
+        """
 
-    else:
+    if not yoga_rows:
 
         yoga_rows = """
         <tr>
@@ -754,76 +809,97 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
     dosha_rows = ""
 
-    dosha_labels = {
-        "manglik":
-            "Manglik Dosha",
+    dosha_config = [
+        (
+            "manglik",
+            "Manglik Dosha"
+        ),
+        (
+            "kaal_sarp",
+            "Kaal Sarp"
+        ),
+        (
+            "pitru_indicator",
+            "Pitru Dosha"
+        ),
+        (
+            "sade_sati",
+            "Sade Sati"
+        ),
+        (
+            "dhaiya",
+            "Saturn Dhaiya"
+        ),
+    ]
 
-        "kaal_sarp":
-            "Kaal Sarp",
-
-        "pitru_indicator":
-            "Pitru Dosha Indicator",
-
-        "sade_sati":
-            "Sade Sati",
-
-        "dhaiya":
-            "Saturn Dhaiya",
-    }
-
-    for key, label in dosha_labels.items():
+    for key, title in dosha_config:
 
         item = (
             doshas.get(key)
-            or
-            {}
+            or {}
         )
 
-        details = []
+        detail = []
 
         if item.get(
             "mars_house"
         ):
-            details.append(
-                f"House: {item.get('mars_house')}"
+            detail.append(
+                f"Mars House: "
+                f"{item.get('mars_house')}"
             )
 
         if item.get(
             "phase"
         ):
-            details.append(
-                f"Phase: {item.get('phase')}"
+            detail.append(
+                f"Phase: "
+                f"{item.get('phase')}"
             )
 
         if item.get(
             "saturn_sign"
         ):
-            details.append(
-                f"Saturn: {item.get('saturn_sign')}"
+            detail.append(
+                f"Saturn Sign: "
+                f"{item.get('saturn_sign')}"
+            )
+
+        if item.get(
+            "saturn_from_moon_house"
+        ):
+            detail.append(
+                "Saturn from Moon: "
+                f"{item.get('saturn_from_moon_house')}"
             )
 
         if item.get(
             "basis"
         ):
-            details.append(
-                str(
-                    item.get("basis")
+            detail.append(
+                safe(
+                    item.get(
+                        "basis"
+                    )
                 )
             )
 
         if item.get(
             "rule"
         ):
-            details.append(
-                str(
-                    item.get("rule")
+            detail.append(
+                safe(
+                    item.get(
+                        "rule"
+                    )
                 )
             )
 
         dosha_rows += f"""
         <tr>
-            <td>
-                {label}
+
+            <td class="strong">
+                {title}
             </td>
 
             <td>
@@ -836,11 +912,12 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
             <td>
                 {
-                    "<br/>".join(details)
-                    if details
+                    "<br/>".join(detail)
+                    if detail
                     else "-"
                 }
             </td>
+
         </tr>
         """
 
@@ -865,8 +942,9 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
         strength_rows += f"""
         <tr>
-            <td>
-                {planet}
+
+            <td class="strong">
+                {safe(planet)}
             </td>
 
             <td>
@@ -888,54 +966,57 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             <td>
                 {yes_no(item.get('combust'))}
             </td>
+
         </tr>
         """
 
 
     # =========================================================
-    # CURRENT TRANSITS
+    # TRANSITS
     # =========================================================
 
     transit_rows = ""
 
-    for planet, transit in (
-        result.get(
-            "transits",
-            {}
-        )
+    for planet, transit in result.get(
+        "transits",
+        {}
     ).items():
 
         longitude = transit.get(
-            "longitude_raw",
-            0
+            "longitude_raw"
         )
 
         try:
-            longitude = (
+
+            longitude_text = (
                 f"{float(longitude):.4f}°"
             )
 
         except Exception:
-            longitude = safe(
+
+            longitude_text = safe(
                 longitude
             )
 
         transit_rows += f"""
         <tr>
-            <td>
-                {planet}
+
+            <td class="strong">
+                {safe(planet)}
             </td>
 
             <td>
-                {safe(
-                    transit.get('sign')
-                    or
-                    transit.get('sign_en')
-                )}
+                {
+                    safe(
+                        transit.get('sign')
+                        or
+                        transit.get('sign_en')
+                    )
+                }
             </td>
 
             <td>
-                {longitude}
+                {longitude_text}
             </td>
 
             <td>
@@ -947,22 +1028,23 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
                     else "Direct"
                 }
             </td>
+
         </tr>
         """
 
 
     # =========================================================
-    # VARGA CHART DETAILS
+    # VARGA
     # =========================================================
-
-    varga_html = ""
 
     charts = result.get(
         "charts",
         {}
     )
 
-    preferred_order = [
+    varga_html = ""
+
+    varga_order = [
         "D1",
         "D2",
         "D3",
@@ -981,7 +1063,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         "D60",
     ]
 
-    for chart_name in preferred_order:
+    for chart_name in varga_order:
 
         chart = charts.get(
             chart_name
@@ -990,7 +1072,7 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         if not chart:
             continue
 
-        rows = ""
+        varga_rows = ""
 
         for house_no, house in (
             chart.get(
@@ -999,15 +1081,19 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             )
         ).items():
 
-            planets = house.get(
-                "planets",
-                []
+            planets = (
+                house.get(
+                    "planets",
+                    []
+                )
+                or []
             )
 
-            rows += f"""
+            varga_rows += f"""
             <tr>
+
                 <td>
-                    {house_no}
+                    {safe(house_no)}
                 </td>
 
                 <td>
@@ -1021,36 +1107,50 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
                         else "-"
                     }
                 </td>
+
             </tr>
             """
 
         varga_html += f"""
-        <div class="subsection-title">
+        <div class="sub-title">
             {chart_name}
         </div>
 
-        <div class="small-info">
+        <div class="mini-info">
             Lagna:
             <strong>
-                {safe(chart.get('lagna_sign'))}
+                {
+                    safe(
+                        chart.get(
+                            'lagna_sign'
+                        )
+                    )
+                }
             </strong>
         </div>
 
         <table>
-            <tr>
-                <th>House</th>
-                <th>Rashi</th>
-                <th>Planets</th>
-            </tr>
 
-            {rows}
+            <thead>
+
+                <tr>
+                    <th>House</th>
+                    <th>Rashi</th>
+                    <th>Planets</th>
+                </tr>
+
+            </thead>
+
+            <tbody>
+                {varga_rows}
+            </tbody>
 
         </table>
         """
 
 
     # =========================================================
-    # DAILY RASHIFAL
+    # RASHIFAL
     # =========================================================
 
     rashifal = result.get(
@@ -1064,11 +1164,10 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
         rashifal_html = f"""
         <table>
+
             <tr>
-                <td>
-                    <strong>
-                        Overall
-                    </strong>
+                <td class="strong">
+                    Overall
                 </td>
 
                 <td>
@@ -1077,10 +1176,8 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             </tr>
 
             <tr>
-                <td>
-                    <strong>
-                        Career
-                    </strong>
+                <td class="strong">
+                    Career
                 </td>
 
                 <td>
@@ -1089,10 +1186,8 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             </tr>
 
             <tr>
-                <td>
-                    <strong>
-                        Finance
-                    </strong>
+                <td class="strong">
+                    Finance
                 </td>
 
                 <td>
@@ -1101,10 +1196,8 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             </tr>
 
             <tr>
-                <td>
-                    <strong>
-                        Love
-                    </strong>
+                <td class="strong">
+                    Love
                 </td>
 
                 <td>
@@ -1113,10 +1206,8 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             </tr>
 
             <tr>
-                <td>
-                    <strong>
-                        Health
-                    </strong>
+                <td class="strong">
+                    Health
                 </td>
 
                 <td>
@@ -1125,10 +1216,8 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             </tr>
 
             <tr>
-                <td>
-                    <strong>
-                        Lucky Number
-                    </strong>
+                <td class="strong">
+                    Lucky Number
                 </td>
 
                 <td>
@@ -1137,22 +1226,21 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
             </tr>
 
             <tr>
-                <td>
-                    <strong>
-                        Lucky Color
-                    </strong>
+                <td class="strong">
+                    Lucky Color
                 </td>
 
                 <td>
                     {safe(rashifal.get('lucky_color'))}
                 </td>
             </tr>
+
         </table>
         """
 
 
     # =========================================================
-    # NOTES
+    # CALCULATION NOTES
     # =========================================================
 
     notes_html = ""
@@ -1162,13 +1250,53 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
         []
     ):
 
-        notes_html += (
-            f"<div class='note'>• {note}</div>"
+        notes_html += f"""
+        <div class="note">
+            {safe(note)}
+        </div>
+        """
+
+
+    # =========================================================
+    # LANGUAGE TITLE
+    # =========================================================
+
+    if data.lang == "or":
+
+        report_title = (
+            "ବୈଦିକ ଜାତକ ଓ କୁଣ୍ଡଳୀ"
+        )
+
+        report_subtitle = (
+            "Swiss Ephemeris ଆଧାରିତ "
+            "ବୈଦିକ ଜ୍ୟୋତିଷ ଗଣନା"
+        )
+
+    elif data.lang == "hi":
+
+        report_title = (
+            "वैदिक जन्म कुंडली"
+        )
+
+        report_subtitle = (
+            "Swiss Ephemeris आधारित "
+            "वैदिक ज्योतिष गणना"
+        )
+
+    else:
+
+        report_title = (
+            "Vedic Jatak & Kundli Report"
+        )
+
+        report_subtitle = (
+            "Swiss Ephemeris Based "
+            "Vedic Astrology Calculation"
         )
 
 
     # =========================================================
-    # COMPLETE PDF HTML
+    # HTML
     # =========================================================
 
     return f"""
@@ -1178,35 +1306,68 @@ def build_pdf_html(result: dict, data: BirthDataRequest) -> str:
 
 <head>
 
-<meta charset="UTF-8">
+<meta charset="UTF-8"/>
 
 <style>
 
+@font-face {{
+    font-family: "{pdf_font_name}";
+    src: url("{pdf_font_uri}");
+}}
+
+
 @page {{
+
     size: A4;
-    margin: 14mm;
+
+    margin-top: 14mm;
+    margin-right: 12mm;
+    margin-bottom: 14mm;
+    margin-left: 12mm;
 }}
 
+
+html,
 body {{
+
     font-family:
-        Helvetica,
-        Arial,
-        sans-serif;
+        "{pdf_font_name}";
 
-    color: #1e293b;
+    color:
+        #1e293b;
 
-    font-size: 10px;
+    font-size:
+        10px;
 
-    line-height: 1.45;
+    line-height:
+        1.5;
 }}
 
 
-/* ======================================
+div,
+span,
+p,
+table,
+thead,
+tbody,
+tr,
+td,
+th,
+strong {{
+
+    font-family:
+        "{pdf_font_name}";
+}}
+
+
+/* =====================================================
    HEADER
-====================================== */
+===================================================== */
 
 .header {{
-    text-align: center;
+
+    text-align:
+        center;
 
     border-bottom:
         3px solid #b71c1c;
@@ -1215,40 +1376,54 @@ body {{
         10px;
 
     margin-bottom:
-        14px;
+        15px;
 }}
 
-.main-title {{
-    font-size:
-        21px;
 
-    font-weight:
-        bold;
+.title {{
+
+    font-family:
+        "{pdf_font_name}";
+
+    font-size:
+        20px;
 
     color:
         #b71c1c;
+
+    font-weight:
+        normal;
 
     margin:
         0;
 }}
 
+
 .subtitle {{
-    color:
-        #64748b;
+
+    font-family:
+        "{pdf_font_name}";
 
     font-size:
         9px;
 
+    color:
+        #64748b;
+
     margin-top:
-        4px;
+        5px;
 }}
 
 
-/* ======================================
-   SECTION HEADINGS
-====================================== */
+/* =====================================================
+   SECTION
+===================================================== */
 
 .section-title {{
+
+    font-family:
+        "{pdf_font_name}";
+
     background-color:
         #b71c1c;
 
@@ -1256,36 +1431,41 @@ body {{
         #ffffff;
 
     font-size:
-        13px;
+        12px;
 
     font-weight:
-        bold;
+        normal;
 
     padding:
         7px;
 
     margin-top:
-        16px;
+        15px;
 
     margin-bottom:
         8px;
 }}
 
-.subsection-title {{
+
+.sub-title {{
+
+    font-family:
+        "{pdf_font_name}";
+
     color:
         #b71c1c;
-
-    border-bottom:
-        1px solid #b71c1c;
 
     font-size:
         11px;
 
     font-weight:
-        bold;
+        normal;
+
+    border-bottom:
+        1px solid #b71c1c;
 
     padding-bottom:
-        3px;
+        4px;
 
     margin-top:
         12px;
@@ -1295,11 +1475,12 @@ body {{
 }}
 
 
-/* ======================================
-   TABLES
-====================================== */
+/* =====================================================
+   TABLE
+===================================================== */
 
 table {{
+
     width:
         100%;
 
@@ -1308,11 +1489,16 @@ table {{
 
     margin-bottom:
         10px;
+
+    font-family:
+        "{pdf_font_name}";
 }}
 
+
 th {{
-    border:
-        1px solid #94a3b8;
+
+    font-family:
+        "{pdf_font_name}";
 
     background-color:
         #f1f5f9;
@@ -1320,8 +1506,8 @@ th {{
     color:
         #0f172a;
 
-    font-weight:
-        bold;
+    border:
+        1px solid #94a3b8;
 
     padding:
         5px;
@@ -1329,30 +1515,58 @@ th {{
     font-size:
         8px;
 
+    font-weight:
+        normal;
+
     text-align:
         left;
+
+    vertical-align:
+        middle;
 }}
 
+
 td {{
+
+    font-family:
+        "{pdf_font_name}";
+
+    color:
+        #334155;
+
     border:
         1px solid #cbd5e1;
 
     padding:
         5px;
 
-    vertical-align:
-        top;
-
     font-size:
         8px;
+
+    vertical-align:
+        top;
 }}
 
 
-/* ======================================
-   INFO BOX
-====================================== */
+.strong {{
+
+    font-family:
+        "{pdf_font_name}";
+
+    color:
+        #0f172a;
+
+    font-weight:
+        normal;
+}}
+
+
+/* =====================================================
+   BIRTH INFO
+===================================================== */
 
 .birth-box {{
+
     background-color:
         #fffbeb;
 
@@ -1360,13 +1574,18 @@ td {{
         1px solid #fde68a;
 
     padding:
-        10px;
+        8px;
 
     margin-bottom:
         12px;
 }}
 
-.small-info {{
+
+.mini-info {{
+
+    font-family:
+        "{pdf_font_name}";
+
     background-color:
         #f8fafc;
 
@@ -1380,24 +1599,31 @@ td {{
         6px;
 }}
 
+
 .note {{
+
+    font-family:
+        "{pdf_font_name}";
+
     background-color:
         #eff6ff;
 
-    border-bottom:
+    border:
         1px solid #bfdbfe;
 
     padding:
-        5px;
+        6px;
+
+    margin-bottom:
+        4px;
 
     color:
         #475569;
-
-    font-size:
-        8px;
 }}
 
+
 .page-break {{
+
     page-break-before:
         always;
 }}
@@ -1416,12 +1642,12 @@ td {{
 
 <div class="header">
 
-    <div class="main-title">
-        Vedic Jatak / Kundli Report
+    <div class="title">
+        {report_title}
     </div>
 
     <div class="subtitle">
-        Swiss Ephemeris Based Astrology Calculation
+        {report_subtitle}
     </div>
 
 </div>
@@ -1432,8 +1658,9 @@ td {{
 ===================================================== -->
 
 <div class="section-title">
-    Birth Details
+    Birth Details / ଜନ୍ମ ବିବରଣୀ
 </div>
+
 
 <div class="birth-box">
 
@@ -1441,105 +1668,125 @@ td {{
 
 <tr>
 
-<td>
-<strong>Name</strong>
-</td>
+    <td class="strong">
+        Name
+    </td>
 
-<td>
-{safe(data.name)}
-</td>
+    <td>
+        {safe(data.name)}
+    </td>
 
-<td>
-<strong>Date</strong>
-</td>
+    <td class="strong">
+        Date
+    </td>
 
-<td>
-{safe(data.date)}
-</td>
-
-</tr>
-
-
-<tr>
-
-<td>
-<strong>Time</strong>
-</td>
-
-<td>
-{safe(data.time)}
-</td>
-
-<td>
-<strong>Timezone</strong>
-</td>
-
-<td>
-UTC {data.tz_offset:+}
-</td>
+    <td>
+        {safe(data.date)}
+    </td>
 
 </tr>
 
 
 <tr>
 
-<td>
-<strong>Latitude</strong>
-</td>
+    <td class="strong">
+        Time
+    </td>
 
-<td>
-{safe(data.latitude)}
-</td>
+    <td>
+        {safe(data.time)}
+    </td>
 
-<td>
-<strong>Longitude</strong>
-</td>
+    <td class="strong">
+        Timezone
+    </td>
 
-<td>
-{safe(data.longitude)}
-</td>
-
-</tr>
-
-
-<tr>
-
-<td>
-<strong>Ayanamsha</strong>
-</td>
-
-<td>
-{safe(result.get('ayanamsha_mode'))}
-</td>
-
-<td>
-<strong>Ayanamsha Value</strong>
-</td>
-
-<td>
-{safe(result.get('ayanamsha_value'))}
-</td>
+    <td>
+        UTC {data.tz_offset:+}
+    </td>
 
 </tr>
 
 
 <tr>
 
-<td>
-<strong>Node Type</strong>
-</td>
+    <td class="strong">
+        Latitude
+    </td>
 
-<td>
-{safe(result.get('node_type'))}
-</td>
+    <td>
+        {safe(data.latitude)}
+    </td>
 
-<td>
-<strong>Lagna</strong>
-</td>
+    <td class="strong">
+        Longitude
+    </td>
 
-<td>
-{safe(result.get('lagna', {}).get('sign'))}
-</td>
+    <td>
+        {safe(data.longitude)}
+    </td>
+
+</tr>
+
+
+<tr>
+
+    <td class="strong">
+        Ayanamsha
+    </td>
+
+    <td>
+        {
+            safe(
+                result.get(
+                    'ayanamsha_mode'
+                )
+                or data.ayanamsha
+            )
+        }
+    </td>
+
+    <td class="strong">
+        Ayanamsha Value
+    </td>
+
+    <td>
+        {
+            safe(
+                result.get(
+                    'ayanamsha_value'
+                )
+            )
+        }
+    </td>
+
+</tr>
+
+
+<tr>
+
+    <td class="strong">
+        Node
+    </td>
+
+    <td>
+        {
+            safe(
+                result.get(
+                    'node_type'
+                )
+                or data.node_type
+            )
+        }
+    </td>
+
+    <td class="strong">
+        Lagna
+    </td>
+
+    <td>
+        {safe(lagna.get('sign'))}
+    </td>
 
 </tr>
 
@@ -1553,42 +1800,53 @@ UTC {data.tz_offset:+}
 ===================================================== -->
 
 <div class="section-title">
-    Lagna Details
+    Lagna / ଲଗ୍ନ
 </div>
 
 <table>
 
-<tr>
-<th>Rashi</th>
-<th>Degree</th>
-<th>Nakshatra</th>
-<th>Pada</th>
-<th>Navamsa</th>
-</tr>
+<thead>
 
 <tr>
 
-<td>
-{safe(result.get('lagna', {}).get('sign'))}
-</td>
-
-<td>
-{safe(result.get('lagna', {}).get('degree'))}
-</td>
-
-<td>
-{safe(result.get('lagna', {}).get('nakshatra'))}
-</td>
-
-<td>
-{safe(result.get('lagna', {}).get('pada'))}
-</td>
-
-<td>
-{safe(result.get('lagna', {}).get('navamsa_sign'))}
-</td>
+    <th>Rashi</th>
+    <th>Degree</th>
+    <th>Nakshatra</th>
+    <th>Pada</th>
+    <th>Navamsa</th>
 
 </tr>
+
+</thead>
+
+
+<tbody>
+
+<tr>
+
+    <td>
+        {safe(lagna.get('sign'))}
+    </td>
+
+    <td>
+        {safe(lagna.get('degree'))}
+    </td>
+
+    <td>
+        {safe(lagna.get('nakshatra'))}
+    </td>
+
+    <td>
+        {safe(lagna.get('pada'))}
+    </td>
+
+    <td>
+        {safe(lagna.get('navamsa_sign'))}
+    </td>
+
+</tr>
+
+</tbody>
 
 </table>
 
@@ -1598,24 +1856,34 @@ UTC {data.tz_offset:+}
 ===================================================== -->
 
 <div class="section-title">
-    Planetary Positions
+    Planetary Positions / ଗ୍ରହ ସ୍ଥିତି
 </div>
 
 <table>
 
+<thead>
+
 <tr>
-<th>Planet</th>
-<th>Rashi</th>
-<th>Degree</th>
-<th>Nakshatra</th>
-<th>Pada</th>
-<th>House</th>
-<th>D9</th>
-<th>Dignity</th>
-<th>Status</th>
+
+    <th>Planet</th>
+    <th>Rashi</th>
+    <th>Degree</th>
+    <th>Nakshatra</th>
+    <th>Pada</th>
+    <th>House</th>
+    <th>D9</th>
+    <th>Dignity</th>
+    <th>Status</th>
+
 </tr>
 
+</thead>
+
+<tbody>
+
 {planet_rows}
+
+</tbody>
 
 </table>
 
@@ -1625,20 +1893,30 @@ UTC {data.tz_offset:+}
 ===================================================== -->
 
 <div class="section-title">
-    12 Bhava / House Details
+    12 Bhava / ଦ୍ୱାଦଶ ଭାବ
 </div>
 
 <table>
 
+<thead>
+
 <tr>
-<th>House</th>
-<th>Rashi</th>
-<th>Lord</th>
-<th>Lord Placed</th>
-<th>Planets</th>
+
+    <th>House</th>
+    <th>Rashi</th>
+    <th>Lord</th>
+    <th>Lord House</th>
+    <th>Planets</th>
+
 </tr>
 
+</thead>
+
+<tbody>
+
 {house_rows}
+
+</tbody>
 
 </table>
 
@@ -1648,47 +1926,159 @@ UTC {data.tz_offset:+}
 ===================================================== -->
 
 <div class="section-title">
-    Panchanga
+    Panchanga / ପଞ୍ଚାଙ୍ଗ
 </div>
 
 <table>
 
 <tr>
-<th>Item</th>
-<th>Details</th>
+    <td class="strong">Tithi</td>
+    <td>{safe(panchanga.get('tithi'))}</td>
 </tr>
 
-{panchanga_rows}
+<tr>
+    <td class="strong">Paksha</td>
+    <td>{safe(panchanga.get('paksha'))}</td>
+</tr>
+
+<tr>
+    <td class="strong">Vara</td>
+    <td>{safe(panchanga.get('vara'))}</td>
+</tr>
+
+<tr>
+    <td class="strong">Nakshatra</td>
+    <td>{safe(panchanga.get('nakshatra'))}</td>
+</tr>
+
+<tr>
+    <td class="strong">Yoga</td>
+    <td>{safe(panchanga.get('yoga'))}</td>
+</tr>
+
+<tr>
+    <td class="strong">Karana</td>
+    <td>{safe(panchanga.get('karana'))}</td>
+</tr>
 
 </table>
 
 
 <!-- =====================================================
-     DASHA
+     CURRENT DASHA
 ===================================================== -->
 
 <div class="section-title">
-    Current Vimshottari Period
+    Current Vimshottari Dasha / ବର୍ତ୍ତମାନ ଦଶା
 </div>
 
-{current_dasha_html}
+<table>
+
+<thead>
+
+<tr>
+
+    <th>Level</th>
+    <th>Lord</th>
+    <th>Start</th>
+    <th>End</th>
+
+</tr>
+
+</thead>
+
+<tbody>
+
+<tr>
+
+    <td>Mahadasha</td>
+
+    <td>
+        {safe(current_md.get('lord'))}
+    </td>
+
+    <td>
+        {safe(current_md.get('start_date'))}
+    </td>
+
+    <td>
+        {safe(current_md.get('end_date'))}
+    </td>
+
+</tr>
 
 
-<div class="subsection-title">
+<tr>
+
+    <td>Antardasha</td>
+
+    <td>
+        {safe(current_ad.get('lord'))}
+    </td>
+
+    <td>
+        {safe(current_ad.get('start_date'))}
+    </td>
+
+    <td>
+        {safe(current_ad.get('end_date'))}
+    </td>
+
+</tr>
+
+
+<tr>
+
+    <td>Pratyantardasha</td>
+
+    <td>
+        {safe(current_pd.get('lord'))}
+    </td>
+
+    <td>
+        {safe(current_pd.get('start_date'))}
+    </td>
+
+    <td>
+        {safe(current_pd.get('end_date'))}
+    </td>
+
+</tr>
+
+</tbody>
+
+</table>
+
+
+<!-- =====================================================
+     DASHA TIMELINE
+===================================================== -->
+
+<div class="sub-title">
     Mahadasha Timeline
 </div>
 
 <table>
 
+<thead>
+
 <tr>
-<th>Lord</th>
-<th>Start</th>
-<th>End</th>
-<th>Years</th>
-<th>Status</th>
+
+    <th>Lord</th>
+    <th>Start</th>
+    <th>End</th>
+    <th>Years</th>
+    <th>Status</th>
+
 </tr>
 
+</thead>
+
+<tbody>
+
 {dasha_rows}
+
+</tbody>
 
 </table>
 
@@ -1698,17 +2088,25 @@ UTC {data.tz_offset:+}
 ===================================================== -->
 
 <div class="section-title">
-    Yogas
+    Yogas / ଯୋଗ
 </div>
 
 <table>
 
+<thead>
+
 <tr>
-<th>Yoga</th>
-<th>Calculation Basis</th>
+    <th>Yoga</th>
+    <th>Basis</th>
 </tr>
 
+</thead>
+
+<tbody>
+
 {yoga_rows}
+
+</tbody>
 
 </table>
 
@@ -1718,68 +2116,106 @@ UTC {data.tz_offset:+}
 ===================================================== -->
 
 <div class="section-title">
-    Dosha Analysis
+    Dosha Analysis / ଦୋଷ ବିଶ୍ଳେଷଣ
 </div>
 
 <table>
 
+<thead>
+
 <tr>
-<th>Dosha</th>
-<th>Status</th>
-<th>Details</th>
+
+    <th>Dosha</th>
+    <th>Status</th>
+    <th>Details</th>
+
 </tr>
+
+</thead>
+
+<tbody>
 
 {dosha_rows}
 
+</tbody>
+
 </table>
 
 
 <!-- =====================================================
-     PLANET STRENGTH
+     STRENGTH
 ===================================================== -->
 
 <div class="section-title">
-    Planet Strength
+    Planet Strength / ଗ୍ରହ ବଳ
 </div>
 
-<div class="small-info">
-{safe(strength.get('note'))}
+<div class="mini-info">
+
+    {
+        safe(
+            strength.get(
+                'note'
+            )
+        )
+    }
+
 </div>
 
 <table>
 
+<thead>
+
 <tr>
-<th>Planet</th>
-<th>Score</th>
-<th>Strength</th>
-<th>Dignity</th>
-<th>Retrograde</th>
-<th>Combust</th>
+
+    <th>Planet</th>
+    <th>Score</th>
+    <th>Strength</th>
+    <th>Dignity</th>
+    <th>Retrograde</th>
+    <th>Combust</th>
+
 </tr>
+
+</thead>
+
+<tbody>
 
 {strength_rows}
 
+</tbody>
+
 </table>
 
 
 <!-- =====================================================
-     TRANSITS
+     TRANSIT
 ===================================================== -->
 
 <div class="section-title">
-    Current Gochar / Transit
+    Gochar / ଗୋଚର
 </div>
 
 <table>
 
+<thead>
+
 <tr>
-<th>Planet</th>
-<th>Rashi</th>
-<th>Longitude</th>
-<th>Motion</th>
+
+    <th>Planet</th>
+    <th>Rashi</th>
+    <th>Longitude</th>
+    <th>Motion</th>
+
 </tr>
 
+</thead>
+
+<tbody>
+
 {transit_rows}
+
+</tbody>
 
 </table>
 
@@ -1791,7 +2227,7 @@ UTC {data.tz_offset:+}
 <div class="page-break"></div>
 
 <div class="section-title">
-    Divisional / Varga Charts
+    Varga Charts / ବର୍ଗ ଚକ୍ର
 </div>
 
 {varga_html}
@@ -1802,7 +2238,7 @@ UTC {data.tz_offset:+}
 ===================================================== -->
 
 <div class="section-title">
-    Daily Rashifal
+    Daily Rashifal / ଦୈନିକ ରାଶିଫଳ
 </div>
 
 {rashifal_html}
@@ -1823,66 +2259,255 @@ UTC {data.tz_offset:+}
 
 </html>
 """
-
 # =====================================================================
 # PDF EXPORT
 # =====================================================================
 
 @app.post("/api/export-pdf")
-def export_kundli_pdf(data: BirthDataRequest):
+def export_kundli_pdf(
+    data: BirthDataRequest
+):
+
     try:
-        result = calculate_astrology(
-            date_str=data.date,
-            time_str=data.time,
-            latitude=data.latitude,
-            longitude=data.longitude,
-            tz_offset=data.tz_offset,
-            ayanamsha_mode=data.ayanamsha,
-            lang=data.lang,
-            node_type=data.node_type,
+
+        if not ASTRO_ENGINE_LOADED:
+
+            raise Exception(
+                "Astrology calculation "
+                "engine is not loaded."
+            )
+
+
+        # -----------------------------------------------------
+        # Check font before doing calculation
+        # -----------------------------------------------------
+
+        font_name, font_path = (
+            get_pdf_font(
+                data.lang
+            )
         )
 
-        result["name"] = data.name
+        if not os.path.exists(
+            font_path
+        ):
+
+            raise Exception(
+                f"Required PDF font "
+                f"is missing: {font_path}"
+            )
+
+
+        # -----------------------------------------------------
+        # Astrology calculation
+        # -----------------------------------------------------
+
+        result = calculate_astrology(
+
+            date_str=
+                data.date,
+
+            time_str=
+                data.time,
+
+            latitude=
+                data.latitude,
+
+            longitude=
+                data.longitude,
+
+            tz_offset=
+                data.tz_offset,
+
+            ayanamsha_mode=
+                data.ayanamsha,
+
+            lang=
+                data.lang,
+
+            node_type=
+                data.node_type,
+        )
+
+
+        result["name"] = (
+            data.name
+        )
+
+
+        # -----------------------------------------------------
+        # Rashifal
+        # -----------------------------------------------------
 
         moon_rashi_en = (
-            result.get("planets_en", {})
-            .get("Moon", {})
-            .get("sign_en", "Aries")
+
+            result
+            .get(
+                "planets_en",
+                {}
+            )
+            .get(
+                "Moon",
+                {}
+            )
+            .get(
+                "sign_en",
+                "Aries"
+            )
         )
 
-        result["rashifal"] = get_daily_rashifal(
-            moon_rashi_en,
-            lang=data.lang,
+
+        result["rashifal"] = (
+            get_daily_rashifal(
+
+                moon_rashi_en,
+
+                lang=
+                    data.lang,
+            )
         )
 
-        html_content = build_pdf_html(result, data)
 
-        pdf_buffer = io.BytesIO()
-        pisa_status = pisa.CreatePDF(
-            io.StringIO(html_content),
-            dest=pdf_buffer,
+        # -----------------------------------------------------
+        # Generate HTML
+        # -----------------------------------------------------
+
+        html_content = (
+            build_pdf_html(
+                result,
+                data
+            )
         )
+
+
+        # -----------------------------------------------------
+        # HTML -> PDF
+        # -----------------------------------------------------
+
+        pdf_buffer = (
+            io.BytesIO()
+        )
+
+
+        pisa_status = (
+            pisa.CreatePDF(
+
+                src=
+                    io.StringIO(
+                        html_content
+                    ),
+
+                dest=
+                    pdf_buffer,
+
+                encoding=
+                    "UTF-8",
+            )
+        )
+
 
         if pisa_status.err:
-            raise Exception("HTML to PDF conversion failed")
 
-        pdf_base64 = base64.b64encode(
-            pdf_buffer.getvalue()
-        ).decode("utf-8")
+            raise Exception(
+                "PDF generation failed. "
+                "xhtml2pdf returned an error."
+            )
 
-        safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", data.name).strip("_")
-        filename = f"Kundli_{safe_name or 'Report'}.pdf"
+
+        pdf_bytes = (
+            pdf_buffer
+            .getvalue()
+        )
+
+
+        if not pdf_bytes:
+
+            raise Exception(
+                "Generated PDF is empty."
+            )
+
+
+        # -----------------------------------------------------
+        # BASE64
+        # -----------------------------------------------------
+
+        pdf_base64 = (
+            base64
+            .b64encode(
+                pdf_bytes
+            )
+            .decode(
+                "utf-8"
+            )
+        )
+
+
+        # -----------------------------------------------------
+        # Filename
+        # -----------------------------------------------------
+
+        safe_name = re.sub(
+
+            r"[^A-Za-z0-9_-]+",
+
+            "_",
+
+            data.name
+
+        ).strip("_")
+
+
+        filename = (
+            f"Jatak_"
+            f"{safe_name or 'Report'}"
+            f".pdf"
+        )
+
+
+        print(
+            "✅ PDF GENERATED:",
+            filename,
+            len(pdf_bytes),
+            "bytes",
+            "font:",
+            font_name
+        )
+
 
         return sanitize_response({
-            "status": "success",
-            "filename": filename,
-            "pdf_base64": pdf_base64,
+
+            "status":
+                "success",
+
+            "filename":
+                filename,
+
+            "pdf_base64":
+                pdf_base64,
+
+            "font":
+                font_name,
         })
 
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=400, detail=str(e))
 
+    except Exception as e:
+
+        print(
+            "❌ PDF EXPORT ERROR:",
+            str(e)
+        )
+
+        traceback.print_exc()
+
+        raise HTTPException(
+
+            status_code=400,
+
+            detail=(
+                f"PDF Export Error: "
+                f"{str(e)}"
+            ),
+        )
 
 # =====================================================================
 # ODIA CALENDAR
